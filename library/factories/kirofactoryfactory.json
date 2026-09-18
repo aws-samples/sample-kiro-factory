@@ -1,0 +1,112 @@
+{
+  "kirofactoryLibrary": 1,
+  "name": "KiroFactoryFactory",
+  "description": "Three loops that build this app from feature plans: a trigger splits plans in plans/factory-ready into work items, a scaled developer cluster implements them in their own worktrees, and a version-control loop commits and merges. Point it at a checkout of sample-ai-factory.",
+  "author": "",
+  "tags": [],
+  "parameters": [
+    {
+      "name": "ready",
+      "value": "plans/factory-ready/",
+      "description": "Folder of feature plans waiting to be built, one feature-<name>-plan.md each."
+    }
+  ],
+  "loops": [
+    {
+      "id": "loop-mtb7v9hg",
+      "name": "factory-feature-trigger",
+      "prompt": "if @ready holds a feature-<name>-plan.md we want to read the markdown and move it into running to claim it. We then take all the ideas in the markdown and each that represents a concise feature is moved onto @output to be picked up by the development loop. Do not split plans unless absolutely necessary, a single loop should implement the full single plan. \n\nCreate a little html page in your loop folder with a kanban view of the three folders factory-ready running and factory-done. Keep it updated.",
+      "autoPause": false,
+      "autoStop": false,
+      "disabled": false,
+      "mcp": [],
+      "tools": [
+        "read",
+        "write",
+        "glob",
+        "grep",
+        "code",
+        "shell",
+        "web",
+        "web_search",
+        "web_fetch",
+        "knowledge",
+        "todo_list",
+        "introspect"
+      ],
+      "intervalSeconds": 3600,
+      "x": -25,
+      "y": 137
+    },
+    {
+      "id": "loop-mtgvyuy6",
+      "name": "version control",
+      "prompt": "if @input seem sane by the looks of it, git commit. If the loops worked in worktrees merge their branches back into the branch @project is currently on ",
+      "autoPause": true,
+      "autoStop": false,
+      "disabled": false,
+      "mcp": [],
+      "tools": [
+        "read",
+        "write",
+        "glob",
+        "grep",
+        "code",
+        "shell",
+        "web",
+        "web_search",
+        "web_fetch",
+        "knowledge",
+        "todo_list",
+        "introspect"
+      ],
+      "x": 655,
+      "y": 139
+    },
+    {
+      "id": "loop-mtir017o",
+      "name": "developer-loop",
+      "prompt": "read @input and start implementing it. Once done with the implementation push it into plans/factory-done and add your completion note at the top of it. Finally hand the topic to @output for version control loop.",
+      "autoPause": true,
+      "autoStop": false,
+      "disabled": false,
+      "mcp": [],
+      "tools": [
+        "read",
+        "write",
+        "glob",
+        "grep",
+        "code",
+        "shell",
+        "web",
+        "web_search",
+        "web_fetch",
+        "knowledge",
+        "todo_list",
+        "introspect"
+      ],
+      "cluster": {
+        "mode": "scaled",
+        "size": 4,
+        "comms": "isolated"
+      },
+      "worktree": true,
+      "x": 312,
+      "y": 138
+    }
+  ],
+  "wires": [
+    {
+      "id": "loop-mtir017o-loop-mtgvyuy6-mtir0hxc",
+      "from": "loop-mtir017o",
+      "to": "loop-mtgvyuy6",
+      "mode": "queue"
+    },
+    {
+      "id": "loop-mtb7v9hg-loop-mtir017o-mtlaa3tt",
+      "from": "loop-mtb7v9hg",
+      "to": "loop-mtir017o",
+      "mode": "queue"
+    }
+  ]
+}

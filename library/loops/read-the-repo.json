@@ -1,0 +1,8 @@
+{
+  "kirofactoryLoop": 1,
+  "name": "Survey",
+  "description": "Walks a codebase a file at a time and queues what it finds.",
+  "prompt": "You are surveying the project in the directory you are running in.\n\nKeep a list of files you have already looked at in a file in your own loop folder. Each round: read that list, pick one source file you have not covered yet, read it, and append it to the list.\n\nWrite one item to @output describing what that file does in two or three sentences, with its path. Note anything that looks wrong, unfinished or surprising, and say plainly when nothing does.\n\nOne file per round. When every source file is on the list, say the survey is complete and stop doing work.",
+  "author": "",
+  "tags": ["code", "starter"]
+}

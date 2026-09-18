@@ -1,0 +1,8 @@
+{
+  "kirofactoryLoop": 1,
+  "name": "Reader",
+  "description": "",
+  "prompt": "read whats in the @input queue one per round, add a sentence to it and hand it to your @output ",
+  "author": "",
+  "tags": []
+}

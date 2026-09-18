@@ -1,0 +1,5529 @@
+/*
+ * Colours are kiro.dev's own, read off its stylesheet rather than eyeballed.
+ *
+ * The thing worth knowing: their neutral ramp is warm, tinted toward the purple
+ * rather than away from it. #19161d and #28242e are not grey with a blue cast,
+ * they are grey with a violet one, which is why the accent sits on them without
+ * looking pasted on. An ordinary cool grey ramp fights #9046ff.
+ *
+ * Their token names are kept in the comments so a value can be traced back.
+ */
+:root {
+  --bg: #19161d;          /* page                                        */
+  --surface: #28242e;     /* panels, boxes, the toolbar                  */
+  --sunken: #171717;      /* form-black-900: inputs and the output log   */
+  --line: #352f3d;        /* form-prey-700: default border               */
+  --line-strong: #4a464f; /* form-prey-600: wires, the wire handle       */
+  --text: #c1bec6;        /* form-prey-300                               */
+  --dim: #938f9b;         /* form-prey-400                               */
+  --accent: #9046ff;      /* form-purple-500: the product purple         */
+  --accent-soft: #9f63ff; /* form-purple-400                             */
+  --run: #33d480;         /* form-green-400                              */
+  --stop: #ff7a88;        /* form-red-300                                */
+  --halt: #f0c14b;        /* the graceful drain: told to stop, finishing */
+  --marker: #fff2b3;      /* code-regex-color: the iteration divider     */
+  /*
+   * A factory parameter, in a prompt and on the directory bar.
+   *
+   * The fifth token colour, and the one addition to this palette that was not
+   * avoidable. Every other reference in a prompt is a word with a fixed meaning that
+   * can be learned once - `@input`, `@project` - but a parameter and an MCP server
+   * are both arbitrary names the factory supplies, and one becomes a value while the
+   * other hands over a capability. Nothing about the two words distinguishes them, so
+   * the tint is doing the whole job.
+   *
+   * Blue because it is the only hue here with nothing else to mean: green is running,
+   * purple is the product and `@output`, amber is a graceful stop, pale yellow is the
+   * tool names, and red is stopping - a red token would read as an error rather than
+   * as a value. It is also the one saturated colour among the token classes, the rest
+   * being near-white, which is what makes it separable from the tools at a glance.
+   */
+  --param: #4fb0ff;       /* form-blue-400: a parameter's name           */
+  /*
+   * A skill and a steering file, in a prompt.
+   *
+   * The sixth and seventh token colours. Both must be separable from `--param`,
+   * which stays the loudest because a parameter substitutes text - the biggest
+   * thing a token can do - and from `--marker`, which the tool names wear. A green
+   * for skills and a violet for steering, each a step less saturated than the hue
+   * it risks being confused with: the skill green is paler than `--run` so a
+   * `@skill` token does not read as a running state, and the steering violet is
+   * paler than `--accent-soft` so it does not read as `@output`.
+   */
+  --skill: #7ed6a4;       /* a softened green: a skill's name            */
+  --steer: #c7a5ff;       /* a softened violet: a steering file's name   */
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/*
+ * Native controls are told the app is dark.
+ *
+ * Without this the browser paints checkboxes, scrollbars and focus rings for a
+ * light page: a checked box drawn light-on-light disappears against `--surface`,
+ * which is exactly what happened to the grant lists. `accent-color` only colours
+ * the fill - it does not tell the platform which scheme it is drawing into.
+ */
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.55 "Helvetica Neue", Helvetica, ui-sans-serif, system-ui, sans-serif;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* ------------------------------------------------------------------- toolbar */
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 14px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+/* ------------------------------------------------------------------- icons */
+
+/*
+ * Heroicons, sized in `em` so an icon matches whatever text it sits beside without
+ * anything being told a pixel value. See Icon.tsx for why the paths are inlined.
+ *
+ * `flex: none` because most of these sit in flex rows next to a label that is
+ * allowed to shrink, and an icon that shrinks is an icon that stops being legible.
+ */
+.icon {
+  width: 1.05em;
+  height: 1.05em;
+  flex: none;
+  /* Optical centring against a text baseline, for the ones used inline. */
+  vertical-align: -0.155em;
+}
+
+/* A button with an icon before its label. */
+.with-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/*
+ * Force stop: kills turns mid-flight, and a killed agent can leave half-finished
+ * work on disk. Icon only - the bolt, with the name and the cost on the tooltip -
+ * because a red button with a label was the loudest thing on the toolbar, and the
+ * loudest thing should not be the one you press least. Still tinted red at rest,
+ * so it reads as the dangerous one before you can read why.
+ */
+button.icon-only.force-stop {
+  border-color: color-mix(in srgb, var(--stop) 55%, var(--line));
+  color: var(--stop);
+}
+
+button.icon-only.force-stop:hover:not(:disabled) {
+  border-color: var(--stop);
+  color: var(--stop);
+  background: color-mix(in srgb, var(--stop) 12%, transparent);
+}
+
+/*
+ * Add loop: the button a new factory starts with, tinted the run green so the way
+ * in is the thing the toolbar visibly offers. Green rather than the accent because
+ * the accent marks deliberate arrangements (worktrees, primary actions elsewhere),
+ * and this is the constructive everyday one - the same green the running state uses.
+ */
+button.add-loop {
+  border-color: color-mix(in srgb, var(--run) 55%, var(--line));
+  color: var(--run);
+}
+
+button.add-loop:hover {
+  border-color: var(--run);
+  background: color-mix(in srgb, var(--run) 12%, transparent);
+}
+
+/* --------------------------------------------------------------- the wordmark */
+
+/*
+ * The name is text, not an image: two lines in the interface's own font, beside a
+ * mark that stacks the ghosts on the factory's roof. "factory for" is thin and
+ * white, "Kiro" below it is heavy and carries the product purple - the same split
+ * the one-line wordmark drew, turned on its side so the product name is the loud
+ * word.
+ */
+.brand {
+  display: flex;
+  /* The icon and the text stand on one ground line, not on a shared centre. */
+  align-items: flex-end;
+  gap: 8px;
+  align-self: center;
+  flex: none;
+  margin-right: 8px;
+  user-select: none;
+}
+
+/*
+ * The mark: the factory alone, standing on the line the letters stand on.
+ *
+ * Two things pull in opposite directions here and very nearly cancel. The
+ * glyph's path ends at y=20.25 of its 24-unit box, so a little of the box below
+ * the building is empty, which would let the building float above a shared box
+ * edge; and the text's box hangs below its own baseline by its descender, which
+ * would drop the letters below one. They very nearly cancel, and the pixel and a
+ * half left over is this margin: with it the base of the building sits on the
+ * feet of the words. Worth re-checking by eye if the sizes above change, since
+ * both halves of the cancellation scale with them.
+ */
+.brand-icon {
+  width: 27px;
+  height: 27px;
+  margin-bottom: -1.5px;
+  color: var(--accent);
+}
+
+/*
+ * The big word. Sized so its box matches the stacked pair beside it - the sub
+ * line plus "factory" - which is what makes the mark read as one composed unit
+ * rather than a word with a caption.
+ */
+/*
+ * The big word, and the one that sets the ground line. Its own box hangs a
+ * pixel higher than "factory"'s at these two sizes, so it is nudged down onto
+ * the same baseline rather than left aligned box-to-box.
+ */
+.brand-kiro {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1;
+  margin-bottom: -1px;
+  color: var(--accent);
+}
+
+/* The stacked pair: the quiet aside over the big white noun. */
+.brand-stack {
+  display: flex;
+  flex-direction: column;
+  white-space: nowrap;
+}
+
+.brand-sub {
+  font-size: 8px;
+  font-weight: 400;
+  line-height: 1.15;
+  color: var(--dim);
+}
+
+.brand-factory {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.0;
+  color: #ffffff;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.sep {
+  width: 1px;
+  height: 24px;
+  background: var(--line);
+}
+
+/*
+ * `a.button` is here so Export can be a real link. The download needs the file
+ * name the server sets in content-disposition, which an anchor gets for free and a
+ * fetch would have to be told separately.
+ */
+button,
+a.button {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 5px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+
+a.button {
+  text-decoration: none;
+  line-height: 1.55;
+}
+
+button:hover:not(:disabled),
+a.button:hover {
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.live {
+  color: var(--run);
+}
+
+/*
+ * The panel toggle: a chevron, no border, no label.
+ *
+ * It points where the panel is going. Open, it points right, meaning "push this
+ * away". Closed, the same glyph is rotated 180deg to point left, meaning "pull it
+ * back". Rotating one path keeps the two states from ever disagreeing.
+ */
+/*
+ * The arrow that folds the panel, sitting on the divider it moves.
+ *
+ * Centred on the border line and painted in the surface colour so it punches a hole
+ * through it, which is the same construction as the flock dashboard's advanced
+ * chevron straddling its row border. Being on the edge is what makes it obvious what
+ * it does, and what makes it still findable once the panel is shut.
+ *
+ * The chevron points the way the panel will move: right to push it away, left to
+ * pull it back. One glyph rotated rather than two icons, so the two states cannot
+ * drift apart.
+ */
+.panel-arrow {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  /*
+   * Shut, the divider is against the window edge, and an arrow centred on it would
+   * have half of itself outside the window. So it tucks fully inside - done by
+   * moving the transform rather than swapping `left` for `right`, because a
+   * transform can be transitioned and so the arrow slides across as the panel
+   * closes instead of jumping the moment the class changes.
+   */
+  transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.15s, color 0.15s;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.resizer.collapsed .panel-arrow {
+  transform: translate(-100%, -50%);
+}
+
+.panel-arrow:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.panel-arrow .icon {
+  transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.panel-arrow.closed .icon {
+  transform: rotate(180deg);
+}
+
+/*
+ * One line, clipped, with the whole message in the `title`.
+ *
+ * The width used to be 340px, which is about forty characters - and since most of
+ * these messages are about a directory, forty characters was reliably forty
+ * characters of absolute path with the reason for the error somewhere off the right
+ * edge. Two things fixed that together: this is wider now, and it is measured in
+ * `ch` so it is a number of characters rather than a number of pixels that happens
+ * to be some characters at the current font size. The other half of the fix is in
+ * the messages themselves, which now say what went wrong before they say where -
+ * see `Host.setBaseDir`. Clipping is only ever the tail of a sentence whose point
+ * has already been made.
+ *
+ * `min` with a viewport share because it sits in a row with tabs and buttons that
+ * have a stronger claim on the space: on a narrow window the error gives way rather
+ * than pushing the toolbar around.
+ */
+.error {
+  color: var(--stop);
+  max-width: min(62ch, 40vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* -------------------------------------------------------------------- layout */
+
+.body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/*
+ * The canvas with the file panel under it, as one column.
+ *
+ * This is what keeps the file panel out from under the settings panel: the row
+ * holds this stack and then the settings panel, so the stack is only as wide as the
+ * canvas and the panel beside it keeps its full height.
+ *
+ * `min-width: 0` because the canvas inside is `flex: 1` on the other axis and a
+ * flex item defaults to refusing to shrink below its content - without it, dragging
+ * the settings panel wider stops working once it meets the canvas.
+ */
+.stack {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* -------------------------------------------------------------------- canvas */
+
+/*
+ * The window onto the factory.
+ *
+ * The dot grid's size and offset are set inline, because they follow the zoom and
+ * the pan - the value here is only the starting point. `grab` says the background
+ * is draggable, which is the one affordance for panning there is room for.
+ */
+.canvas {
+  position: relative;
+  flex: 1;
+  overflow: hidden;
+  background-image: radial-gradient(circle, var(--line) 1px, transparent 1px);
+  background-size: 22px 22px;
+  touch-action: none;
+  cursor: grab;
+}
+
+.canvas.panning {
+  cursor: grabbing;
+}
+
+/*
+ * A file is being dragged over the canvas, and dropping it imports a factory. An
+ * inset ring in the accent rather than an overlay, because the drag is being
+ * watched from outside the window and the border is legible without covering the
+ * loops the drop will land beside.
+ */
+.canvas.dropping {
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+
+/*
+ * The layer the loop cards sit on, moved and scaled as one.
+ *
+ * Transparent to the pointer so the canvas underneath stays pressable for a pan -
+ * the cards opt themselves back in. `transform-origin` at the corner is what makes
+ * the transform the plain `screen = (world - origin) * scale` that geometry.ts
+ * documents; the default centre origin would fold the viewport size into it.
+ *
+ * Zero-sized rather than filling the canvas: it is a coordinate space, not a
+ * surface, and a full-size box would be a second thing the pointer has to miss.
+ */
+.canvas-space {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+
+.canvas-space > * {
+  pointer-events: auto;
+}
+
+.wires {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.wire path {
+  fill: none;
+  stroke: var(--line-strong);
+  stroke-width: 2;
+}
+
+/*
+ * The layer the unwire × lives in: above the cards, so the × can sit on the input
+ * dot rather than behind the box that owns it.
+ *
+ * Inert apart from the × itself. It covers the whole canvas, so anything else in
+ * here taking pointer events would swallow every pan and every click on a loop.
+ */
+.wires-over {
+  pointer-events: none;
+}
+
+/*
+ * The × that removes one wire, on the dot where it arrives.
+ *
+ * Only the hovered wire's × exists at all - see `hoverWire` in Canvas - so there is
+ * nothing to hide here and no `:hover` rule to get wrong. Ten wires would otherwise
+ * be ten delete buttons sitting on the canvas, and this is the one control here that
+ * destroys something.
+ */
+.wire-x {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.wire-x circle {
+  fill: var(--surface);
+  stroke: var(--line-strong);
+}
+
+.wire-x path {
+  stroke: var(--dim);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  fill: none;
+}
+
+.wire-x:hover circle {
+  fill: var(--stop);
+  stroke: var(--stop);
+}
+
+.wire-x:hover path {
+  stroke: var(--bg);
+}
+
+/* A fat transparent copy of the curve, so double-clicking a 2px line is possible. */
+.wire .wire-hit {
+  stroke: transparent;
+  stroke-width: 14;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+.wire:hover .wire-line {
+  stroke: var(--accent);
+}
+
+/*
+ * A topic, drawn as two rails.
+ *
+ * There is no offset-curve trick here and none is needed: a thick stroke with a
+ * thin background-coloured stroke laid over it leaves its own two edges showing,
+ * which is a pair of parallel conductors along any path, curves included. The
+ * point it makes is the difference from a queue - a copy going to each subscriber
+ * rather than one item going to one of them.
+ */
+.wire.topic .wire-line {
+  stroke-width: 6;
+}
+
+.wire.topic .wire-core {
+  stroke: var(--bg);
+  stroke-width: 2;
+}
+
+/*
+ * Items on the move.
+ *
+ * Drawn as its own path on top rather than by dashing the conductor, so the wire
+ * still reads as a solid line and the dashes read as things travelling along it.
+ * Zero width when there is nothing waiting, so a still wire means an empty queue
+ * and motion on the canvas always means real backlog.
+ *
+ * The dash cycle is 4 on, 14 off, and the animation walks the offset by exactly
+ * that 18 so it loops without a seam. Negative, because a decreasing offset moves
+ * the dashes the way the path was drawn, which is producer to consumer.
+ */
+.wire .wire-flow {
+  stroke: var(--accent-soft);
+  stroke-width: 0;
+  stroke-linecap: round;
+  stroke-dasharray: 4 14;
+}
+
+.wire.has-work .wire-flow {
+  stroke-width: 4;
+  animation: wire-flow 0.9s linear infinite;
+}
+
+@keyframes wire-flow {
+  to {
+    stroke-dashoffset: -18;
+  }
+}
+
+/* The shared trunk and its branches, so a fan-out reads as one wire divided. */
+.wire.shared .wire-line {
+  stroke-width: 2;
+}
+
+.wire.shared .branch.selected .wire-line {
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wire.has-work .wire-flow {
+    animation: none;
+  }
+}
+
+.wire-draft {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-dasharray: 5 4;
+}
+
+/*
+ * The queue depth: on the middle of a plain wire, on the junction of a shared one.
+ *
+ * Takes pointer events so its `<title>` actually appears, which is where the two
+ * modes are explained. The parent `.wires` layer is transparent to the pointer so
+ * the canvas underneath stays draggable, and that inherits, so the badge has to
+ * opt back in or the tooltip never fires.
+ */
+.wire-count rect {
+  pointer-events: all;
+  cursor: pointer;
+  fill: var(--surface);
+  stroke: var(--line-strong);
+  stroke-width: 1;
+}
+
+.wire-count text {
+  fill: var(--dim);
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-anchor: middle;
+  /* Otherwise the label eats the double-click that removes the wire. */
+  pointer-events: none;
+}
+
+/* Work waiting to be picked up is the one state worth drawing attention to. */
+.wire.has-work .wire-line {
+  stroke: var(--accent);
+}
+
+.wire.has-work .wire-count rect {
+  stroke: var(--accent);
+}
+
+.wire.has-work .wire-count text {
+  fill: #ffffff;
+}
+
+/*
+ * The zoom controls, bottom-left of the canvas.
+ *
+ * Bottom-left because the panel is on the right and the toolbar is on top, so it
+ * is the one corner nothing else wants. Quiet until hovered: it is a control you
+ * reach for occasionally on a canvas you look at constantly.
+ */
+.view-controls {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  display: flex;
+  align-items: stretch;
+  gap: 1px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(4px);
+  opacity: 0.62;
+  transition: opacity 0.15s ease;
+  cursor: default;
+}
+
+.view-controls:hover,
+.view-controls:focus-within {
+  opacity: 1;
+}
+
+.view-controls button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 24px;
+  padding: 0 4px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.view-controls button:hover:not(:disabled) {
+  background: var(--sunken);
+  color: var(--text);
+}
+
+.view-controls button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.view-controls button svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Tabular figures so stepping through the zoom does not shuffle the row's width. */
+.view-controls .zoom-level {
+  min-width: 46px;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------------- loop */
+
+.loop {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 10px 12px;
+  cursor: grab;
+  user-select: none;
+}
+
+.loop.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/*
+ * A loop waiting for work.
+ *
+ * Dimmer than the running border and brighter than the stopped one, which is the
+ * order the three states belong in: going, going but idle, not going. Deliberately
+ * the same hue as `--run` rather than a fourth colour, because paused is a kind of
+ * running and a colour of its own would say it was a kind of stopped.
+ */
+.loop.paused {
+  border-color: color-mix(in srgb, var(--run) 45%, var(--line));
+}
+
+.loop.running {
+  border-color: var(--run);
+}
+
+/*
+ * Told to stop, still finishing: the final turn is draining and nothing new will
+ * start. Yellow rather than a dimmer green because this is not a kind of running
+ * - it is on its way to stopped, and the border should say so from across the
+ * canvas the same way the output log's "stopping after this turn" does up close.
+ */
+.loop.stopping {
+  border-color: var(--halt);
+}
+
+/*
+ * A parked loop: on the canvas, wired, editable, and left out of every start.
+ *
+ * Faded rather than restyled, because nothing about it has changed except
+ * whether it runs - the wires still mean what they meant and the settings still
+ * say what they said. The dashed border is the second half of that, and the part
+ * that survives being looked at on a bright screen where a fade alone can read
+ * as nothing.
+ *
+ * Hovering brings it most of the way back. The way to un-park a loop is a button
+ * on the card, and a control you have to squint at to undo the state it caused
+ * is a poor bargain; approaching the card is enough of a signal to lift it.
+ */
+.loop.disabled {
+  opacity: 0.45;
+  border-style: dashed;
+  transition: opacity 0.12s;
+}
+
+.loop.disabled:hover {
+  opacity: 0.9;
+}
+
+/* ------------------------------------------------------------ loop clusters */
+
+/*
+ * A cluster: the same card, with boxes stacked behind it.
+ *
+ * The stack is the whole visual language for "this component is several sessions",
+ * and it is drawn *behind* rather than beside so the front box stays exactly where
+ * a plain loop's box would be. Every wire endpoint, both port dots and the drag
+ * handle are positioned off `loop.x, loop.y` and the nominal card size; a stack
+ * that displaced the front box would pull all of them off it. See `STACK_STEP` in
+ * geometry.ts.
+ *
+ * `--stack-depth` and `--stack-step` arrive inline from the canvas: the depth is a
+ * fact about the document and the step is a geometry constant, and neither is
+ * CSS's to decide. The card's own padding is grown by the overhang on the same
+ * two, so the pressable box covers what is drawn.
+ */
+/*
+ * The card's fill moves to a pseudo-element, and the reason is painting order.
+ *
+ * A child with `z-index: -1` goes behind its parent's *background* only while the
+ * parent forms no stacking context - and the moment one is formed, CSS paints the
+ * context's own background at step 1 and its negative-z-index descendants at step
+ * 2, so the stack lands on top of the card instead of under it. `.loop.cluster`
+ * used to declare `z-index: 1` and did exactly that: the shadow boxes' borders drew
+ * across the front card, which is the wrong way round and the whole illusion
+ * inverted.
+ *
+ * Dropping that z-index fixes the ordinary case and not the parked one, because
+ * `.loop.disabled` fades with `opacity` and an opacity below 1 forms a stacking
+ * context too. So relying on the parent staying context-free is not something this
+ * can do - one unrelated state change away from breaking again.
+ *
+ * With the fill on `::before` the ordering stops depending on any of that. The
+ * pseudo-element is a positioned child at `z-index: auto`, so it paints at step 6,
+ * and the stack at step 2 - under it either way, stacking context or not. The
+ * border stays on `.loop` so every state rule that colours it keeps working
+ * untouched; a 1px ring painted early is not something the eye can find.
+ */
+.loop.cluster {
+  background: transparent;
+  /*
+   * A stacking context, deliberately, and `isolation` rather than a `z-index` so it
+   * says only that and does not also reorder this card against its neighbours.
+   *
+   * Both layers below sit at negative z-index, and negative z-index only means
+   * "behind the content, in front of the background" *inside* a stacking context.
+   * Without one they escape to `.canvas-space` and paint behind every card on the
+   * canvas, so an overlapping neighbour would come out in front of this card's own
+   * fill.
+   */
+  isolation: isolate;
+}
+
+/*
+ * The card's face: its fill *and* its border, in one layer above the stack.
+ *
+ * Three layers, and the order is the whole point: stack, face, content.
+ *
+ * Within a stacking context CSS paints negative z-index descendants at step 2 -
+ * after the element's own background and border, before its in-flow content. That
+ * is the only band the face can sit in: anything at zero or above paints at step 6,
+ * which is after the flex children, so a face there covers the name, the chips and
+ * the buttons.
+ *
+ * The border has to come along, and that is the part that is easy to miss. A real
+ * border belongs to step 1, which is *earlier* than step 2 - so the offset boxes
+ * were painting their opaque backgrounds over the front card's own border along its
+ * right and bottom edges, exactly where they overlap it. The card read as sitting
+ * slightly *under* its own stack.
+ *
+ * `inset: -1px` is what lets one pseudo-element do both. It resolves against the
+ * padding box, so a negative 1px expands to precisely the border box, and the
+ * pseudo's own 1px border then lands exactly on top of the real one. The colour and
+ * style are inherited rather than restated, so every state rule that paints
+ * `.loop`'s border - running, paused, stopping, selected, and the dashed parked one
+ * - keeps working with nothing duplicated here.
+ *
+ * The stack boxes use the same `-1px` for the same reason, which is what keeps the
+ * gaps between them even.
+ *
+ * The real border underneath is now purely structural: it still sizes the box, and
+ * it is covered pixel for pixel.
+ */
+.loop.cluster::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  z-index: -1;
+  background: var(--surface);
+  border-width: 1px;
+  border-color: inherit;
+  border-style: inherit;
+  border-radius: 9px;
+  pointer-events: none;
+}
+
+/*
+ * The selection ring, which lives on the same layer for the same reason.
+ *
+ * `.loop.selected` puts it on the card as a `box-shadow`, and a box shadow is
+ * painted with the background at step 1 - so the stack overdrew it on the two edges
+ * it overlaps, and a selected cluster lost the outer half of its ring exactly where
+ * the eye goes looking for it.
+ */
+.loop.cluster.selected::before {
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/*
+ * A flock cluster squares the corner its badge stands on.
+ *
+ * The tab is flush with the card's left edge, and the two only read as one edge if
+ * nothing interrupts the line between them. A 9px corner here curves away to the
+ * right exactly where the tab's edge comes down, leaving a notch - small, and the
+ * kind of small that reads as two objects rather than one.
+ *
+ * Squared, the outline runs unbroken from the tab's rounded top-left all the way down
+ * to the card's rounded bottom-left. The component becomes one shape with a step in
+ * its right-hand side, which is what a tab is supposed to look like.
+ *
+ * On the face rather than on `.loop`, because the face is the border that shows - see
+ * the note there. The real border's own rounded corner sits inside the face's square
+ * one and is covered by it.
+ */
+.loop.cluster.flock::before {
+  border-top-left-radius: 0;
+}
+
+/*
+ * One box per member behind the front one, offset down and right.
+ *
+ * Elements rather than pseudo-elements because the count varies and there are only
+ * ever two pseudo-elements to be had. Absolutely positioned against the card, so
+ * they cost the flex column nothing and cannot push the content around.
+ *
+ * Progressively dimmer with depth: the nearest shadow is nearly the card's own
+ * border and the furthest is barely there. A stack of five at one opacity reads as
+ * a hatched pattern; falling away is what makes it read as depth, which is the
+ * thing being said.
+ *
+ * They share one z-index and rely on tree order for depth, so the canvas renders
+ * them deepest-first - see the note there. Every box is opaque, so getting that
+ * backwards does not merely reorder the fade, it hides the shallower boxes' bottom
+ * and right edges behind the deeper ones' backgrounds.
+ */
+.loop .stack-box {
+  position: absolute;
+  /*
+   * `-1px`, matching the face, so every gap in the stack is the same width.
+   *
+   * `inset` resolves against the padding box, and the face expands to the border
+   * box with `-1px` because it carries the card's border. At `0` these boxes were
+   * a pixel smaller than the card on every side, so the first gap - card edge to
+   * first box - came out at 6px against 7px for every gap after it. Uniform boxes
+   * are what makes a stack read as one object seen in perspective; one narrow gap
+   * at the front reads as a mistake, and it was.
+   */
+  inset: -1px;
+  /* Below the card's face, which is at -1. See the note on `::before` above. */
+  z-index: -2;
+  transform: translate(calc(var(--i) * var(--stack-step)), calc(var(--i) * var(--stack-step)));
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  opacity: calc(1 - var(--i) * 0.14);
+  pointer-events: none;
+}
+
+/* The stack follows the card's state, so a running cluster is lit all the way back. */
+.loop.cluster.running .stack-box {
+  border-color: color-mix(in srgb, var(--run) 60%, var(--line));
+}
+
+.loop.cluster.paused .stack-box {
+  border-color: color-mix(in srgb, var(--run) 30%, var(--line));
+}
+
+.loop.cluster.stopping .stack-box {
+  border-color: color-mix(in srgb, var(--halt) 60%, var(--line));
+}
+
+.loop.cluster.selected .stack-box {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
+}
+
+/*
+ * "and more", just past the corner of the deepest box.
+ *
+ * Outside the stack rather than on it, which it has to be: the boxes are *under*
+ * the card and under each other, so anything drawn inside the deepest one's
+ * footprint is covered by the four boxes and the card in front of it. Only the
+ * region past the last corner is visible at all.
+ *
+ * Past the corner also reads better than on it - it continues the direction the
+ * stack is already going, so it says "and further back" rather than labelling the
+ * box it sits on. The offset is the stack's own overhang plus a couple of pixels of
+ * air, computed from the same two custom properties the boxes are offset by, so it
+ * tracks the depth without anything having to be kept in step.
+ */
+.loop .stack-more {
+  position: absolute;
+  left: calc(100% + (var(--stack-depth) - 1) * var(--stack-step) + 3px);
+  top: calc(100% + (var(--stack-depth) - 1) * var(--stack-step) - 12px);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--dim);
+  pointer-events: none;
+}
+
+/*
+ * The Kiro Flock badge, straddling the card's top edge.
+ *
+ * Half outside the box on purpose. Inside, it would be a fourth row competing with
+ * the name for the card's width; on the edge it reads as a label attached to the
+ * component rather than as another of its settings, which is the distinction worth
+ * drawing - every grey chip below says how this loop is configured, and this says
+ * what kind of thing it is.
+ *
+ * Purple is the product's own accent, and the glow is the one place on the canvas
+ * anything glows. That is deliberate scarcity: a ring of agents reading each other
+ * is the most interesting thing a factory can contain, and it is rare enough that
+ * making it the single loud element costs nothing elsewhere.
+ */
+.flock-badge {
+  /*
+   * The badge's own colour, in one place.
+   *
+   * Everything tinted below reads this rather than naming a colour, so tracking the
+   * card takes one declaration per state instead of four.
+   *
+   * Grey is the resting value, and it is the card's own grey rather than the
+   * product's purple. The badge is part of the component now, not a sticker on it, so
+   * an untouched idle cluster should look like every other untouched idle card on the
+   * canvas - a purple outline on the one component that happens to have a tab made
+   * the tab the loudest thing in a quiet factory, which is backwards: nothing is
+   * happening yet.
+   *
+   * The colour is reserved for when there is something to say. The states below say
+   * exactly what the card's border says, in the same order the card resolves them.
+   */
+  --badge: var(--line-strong);
+
+  position: absolute;
+  /*
+   * A tab standing on the card's top edge, not a beacon hovering over it.
+   *
+   * `bottom: 100%` puts the badge's bottom edge at the top of the padding box -
+   * which is one pixel *below* the card's border box, so the badge's background
+   * covers that strip of border and the two shapes fuse into one silhouette. With
+   * no bottom border of its own there is no seam between them.
+   *
+   * Fully above the card rather than straddling it, which also settles the problem
+   * the old `top: -18px` was working around: nothing overlaps the title row, so the
+   * name has the card's full width whatever the badge is doing.
+   */
+  bottom: 100%;
+  /*
+   * Flush with the card's left edge, so the two share one continuous vertical line.
+   *
+   * `-1px` rather than `0`: the containing block is the padding box, and the card's
+   * visible edge is its border box, one pixel further out. Aligning to the padding
+   * box would leave the tab inset by exactly the width of the line it is supposed to
+   * be continuing.
+   *
+   * This only reads as an extension because the card squares its own top-left corner
+   * for a flock cluster - see `.loop.cluster.flock::before` below. Left rounded, the
+   * card's edge would curve away to the right just as the tab's edge arrived, and the
+   * notch is precisely the thing that gives away a tab as pasted on.
+   */
+  left: -1px;
+  /*
+   * Behind the card, which is how the glow is trimmed to the top half.
+   *
+   * A `box-shadow` radiates from all four edges and there is no way to draw only
+   * part of one, so the downward half was washing over the card's title. Rather
+   * than fight the shadow, the badge moves below the card's face - the face is
+   * opaque and covers the whole border box, so everything the badge throws
+   * downward lands behind it and the only light that escapes is what clears the
+   * card's top edge.
+   *
+   * `-2` puts it in the same band as the stack boxes, which is harmless: they are
+   * offset down and right and never reach above the card's top edge, so the two
+   * cannot overlap and their order between themselves does not matter.
+   *
+   * The badge now emerges from behind the card rather than being fused to it, so
+   * the card's own top border runs unbroken beneath it - which is the cleaner join
+   * of the two, and one less thing depending on a 1px overlap landing exactly.
+   */
+  z-index: -2;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 3px 11px 4px;
+  background: color-mix(in srgb, var(--badge) var(--badge-fill), var(--surface));
+  border: 1px solid color-mix(in srgb, var(--badge) 65%, transparent);
+  border-bottom: 0;
+  /*
+   * Top-left at the card's own 9px, top-right domed at 13px, bottom square.
+   *
+   * The asymmetry is what makes the composite silhouette work. This corner is no
+   * longer the tab's corner - with the card squared beneath it, it has become the
+   * top-left of the whole component, so it wants the radius every other corner of the
+   * card has. The right-hand corner is still the tab's own and keeps the dome.
+   */
+  border-radius: 9px 13px 0 0;
+  font-size: 12.5px;
+  font-weight: 700;
+  /*
+   * Barely any tracking. Bold mixed-case at 0.05em was reading as emphasis on top of
+   * emphasis - the badge already has weight, colour and a glow, and letterspacing a
+   * wordmark as well is the point where confident turns into shouting.
+   */
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  /*
+   * The glow's strength, as variables, so the state rules below move it rather than
+   * restating the whole shadow. A resting badge is deliberately near the floor.
+   */
+  --glow-near: 20%;
+  --glow-far: 10%;
+  /*
+   * How much of the badge's colour is in its fill.
+   *
+   * Low everywhere, and lower still while live. A tinted area was the wrong thing to
+   * spend colour on: the card beside it is plain `--surface`, so a filled tab reads as
+   * a different material stuck to the top rather than as part of the component, and a
+   * colour spread over the whole area is loud in a way a 1px border is not.
+   *
+   * At rest the colour is the card's grey, so this barely registers either way and the
+   * tab is simply the card continuing upward - which is the point. The state lives in
+   * the border, the glow and the movement.
+   */
+  --badge-fill: 12%;
+  /*
+   * Two coloured rings and a hairline of light along the top edge.
+   *
+   * The rings are a close bright one and a wide faint one, which is what makes it
+   * read as light coming off the badge rather than as a blurred copy behind it. The
+   * inset white line is the detail that does the most for the least: a tab lit from
+   * above has a bright top edge, and one crisp highlight is the difference between a
+   * shape with a glow attached and a shape that looks made of something.
+   *
+   * No animation here. See the live rule below - a thing that pulses while nothing
+   * is happening is decoration, and decoration is what makes a label look unserious.
+   */
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 10%, transparent),
+    0 0 6px color-mix(in srgb, var(--badge) var(--glow-near), transparent),
+    0 0 14px color-mix(in srgb, var(--badge) var(--glow-far), transparent);
+  pointer-events: auto;
+  /*
+   * It is a link - to Kiro Flock itself, which is what the badge names.
+   *
+   * No underline, because the wordmark is a lockup and a rule drawn under it would
+   * be a line through the middle of a composed shape. The pointer is the affordance
+   * instead, with the border firming up on hover below: on a canvas where the only
+   * other cursor change is the grab hand, a pointer is unambiguous.
+   *
+   * The three spans inside set their own colours, so the UA's link blue never gets
+   * anywhere near the mark.
+   */
+  text-decoration: none;
+  cursor: pointer;
+  transition: box-shadow 0.3s ease, background-color 0.3s ease, border-color 0.3s ease;
+}
+
+/*
+ * Hovered, the outline goes to full strength.
+ *
+ * `--badge` rather than a colour, so this tracks the state the card is in - grey at
+ * rest, green while running, yellow while draining - and the hover is the same tab
+ * sharpening rather than a second colour arriving on top of the first.
+ *
+ * The border and not the fill or the glow: both of those are set by the live-state
+ * rules, which are three classes deep and would win against this on specificity.
+ * Nothing sets `border-color` directly, so the one declaration lands in every state
+ * without an `!important` to force it.
+ */
+.flock-badge:hover {
+  border-color: var(--badge);
+}
+
+/*
+ * A live cluster glows the colour its border is glowing.
+ *
+ * The badge is part of the card now, so it has to answer the same question the
+ * border answers - is this going - rather than sitting there purple while everything
+ * around it turns green. Same three states and the same three colours the card
+ * itself uses: green while running, green while waiting because waiting is live, and
+ * the drain's yellow on the way out.
+ *
+ * The wordmark is deliberately left alone. `Kiro` stays purple and `flock` stays
+ * white in every state, because that is the product's mark and not a status light -
+ * recolouring it would make the badge say the state twice and the name not at all.
+ */
+/*
+ * Selected: the purple the card's own border takes.
+ *
+ * This is where the accent belongs - the operator has picked this component out, so
+ * the tab lighting up with the border is the tab agreeing with the card rather than
+ * announcing itself.
+ *
+ * Ordered before the live states and at the same specificity, deliberately: `.loop`
+ * itself lists `selected` before `running` so that a running card stays green when
+ * selected, and the badge has to resolve the same way or a selected running cluster
+ * would have a green border and a purple tab.
+ */
+.loop.selected .flock-badge {
+  --badge: var(--accent);
+}
+
+.loop.running .flock-badge,
+.loop.paused .flock-badge {
+  --badge: var(--run);
+}
+
+.loop.stopping .flock-badge {
+  --badge: var(--halt);
+}
+
+/*
+ * Live, and this is where the glow earns itself.
+ *
+ * The badge only breathes while the cluster is actually going. That single change is
+ * most of what separates a label that looks designed from one that looks decorated:
+ * at rest it is a quiet coloured tab, and the moment it starts moving that movement
+ * *means* something - the ring is up. A badge pulsing at a stopped cluster is an
+ * animation with nothing to report, and the eye learns to ignore it, which costs the
+ * signal for nothing.
+ *
+ * It also stacks with the colour: live is greener *and* moving, so the state is
+ * legible from across the canvas and at a glance up close.
+ */
+.loop.running .flock-badge,
+.loop.paused .flock-badge,
+.loop.stopping .flock-badge {
+  --glow-near: 34%;
+  --glow-far: 17%;
+  /*
+   * Almost no fill while live, so the tab is the card's own surface and the state is
+   * carried by the border, the glow and the movement. Three signals in the outline
+   * beat one in the fill: the outline is where a shape's identity lives, and it leaves
+   * the tab looking like part of the component rather than a coloured sticker on it.
+   */
+  --badge-fill: 4%;
+  animation: flock-glow 3.2s ease-in-out infinite;
+}
+
+/*
+ * Purple Kiro, white flock: the product's own two-tone wordmark, in miniature.
+ *
+ * Both keep their colours in every state, including when the badge turns green. It is
+ * a mark, not a status light - the shell around it is already saying the state, and a
+ * wordmark that changes colour says it twice and says the name less.
+ *
+ * The weights differ by one step, which is how the real thing reads: the product name
+ * leads and the qualifier follows. At this size it is nearly subliminal, and it is the
+ * kind of thing that makes a lockup look set rather than typed.
+ */
+.flock-kiro {
+  font-weight: 700;
+  color: var(--accent-soft);
+}
+
+.flock-flock {
+  font-weight: 600;
+  color: #ffffff;
+}
+
+/*
+ * `local`, and the badge would be dishonest without it.
+ *
+ * Kiro Flock is a cluster of cloud instances coordinating through object storage.
+ * This is a handful of subprocesses coordinating through a folder on one disk -
+ * the same idea at a completely different scale. Small, grey and italic is exactly
+ * the weight that claim deserves: present for anyone who looks, silent for anyone
+ * skimming.
+ */
+.flock-local {
+  /*
+   * No divider. It sits after the wordmark with the flex gap between them and
+   * nothing else.
+   *
+   * There was a hairline rule here, on the reasoning that a qualifier behind a
+   * divider reads as belonging to the badge while trailing italic grey reads as an
+   * aside somebody appended. At this size that was one detail too many: three words,
+   * two type colours, a border, a glow and a tab silhouette, and the rule was the
+   * element with the least to say competing with all of them. Removed, the lockup is
+   * one shape again - and `local` reading as an aside is closer to what it is anyway.
+   *
+   * The type keeps doing the separating: 10px against 12.5px, regular against bold,
+   * italic against upright, grey against the mark's two colours. Four differences
+   * are plenty of division without drawing any.
+   */
+  font-size: 10px;
+  font-weight: 400;
+  font-style: italic;
+  letter-spacing: 0.03em;
+  color: var(--dim);
+}
+
+/*
+ * The breath. Reads `--badge` off the element, so it follows the state with it.
+ *
+ * A narrow swing - near enough to the resting value that it reads as something alive
+ * rather than as something flashing.
+ */
+@keyframes flock-glow {
+  50% {
+    box-shadow:
+      /* Carried through unchanged: a shadow list animates as a list, so omitting
+         the highlight here would fade the tab's top edge out and back on every
+         breath. */
+      inset 0 1px 0 color-mix(in srgb, #ffffff 10%, transparent),
+      0 0 9px color-mix(in srgb, var(--badge) 48%, transparent),
+      0 0 20px color-mix(in srgb, var(--badge) 24%, transparent);
+  }
+}
+
+/*
+ * The same selectors the animation is set on, not the bare `.flock-badge`.
+ *
+ * The breath moved onto the live state rules, which are three classes deep, so an
+ * override on `.flock-badge` alone lost on specificity and this whole block was
+ * quietly doing nothing. Matching the selectors keeps it winning without an
+ * `!important`. The brighter live glow stays - it is a colour, not a motion, and
+ * reduced motion is not reduced contrast.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .loop.running .flock-badge,
+  .loop.paused .flock-badge,
+  .loop.stopping .flock-badge {
+    animation: none;
+  }
+}
+
+.loop-name {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.loop-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * The disable button, top right of the card.
+ *
+ * `margin-left: auto` puts it there rather than a position: it is the last thing
+ * in the title row, and the name - which truncates - should have all the width
+ * that is left over. Quiet until hovered, and red once the loop is parked, which
+ * with the card's own fade is the state read from across the canvas.
+ */
+.loop-disable {
+  margin-left: auto;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.loop-disable svg {
+  width: 13px;
+  height: 13px;
+}
+
+.loop-disable:hover {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+.loop-disable.on {
+  color: var(--stop);
+  border-color: color-mix(in srgb, var(--stop) 45%, transparent);
+}
+
+/*
+ * The pinned model, beside the name.
+ *
+ * It lives up here rather than in the chip row because it is the longest marker -
+ * a model id next to `mcp` and `waits` was the thing that overflowed the box.
+ * The name yields to it only so far: the model truncates first, because "which
+ * loop" beats "which model" when the two compete for the same line.
+ */
+.loop-model {
+  /* Its own row, hugging its text rather than stretching across the card. */
+  align-self: flex-start;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 1px 7px;
+}
+
+/*
+ * A loop on the machine's default rather than a model of its own.
+ *
+ * Quieter and borderless, so the row still distinguishes a choice from an
+ * inheritance while naming the model in both cases. Same trick on the panel's
+ * select: dimmed until the operator picks something.
+ */
+.loop-model.inherited {
+  border-color: transparent;
+  opacity: 0.75;
+}
+
+select.model-pick.inherited {
+  color: color-mix(in srgb, var(--dim) 80%, var(--surface));
+}
+
+.loop-icon {
+  width: 15px;
+  height: 15px;
+  color: var(--dim);
+}
+
+.loop.selected .loop-icon {
+  color: var(--accent);
+}
+
+/* Still, but still coloured: the loop is up, it just has nothing to turn for. */
+.loop.paused .loop-icon {
+  color: color-mix(in srgb, var(--run) 55%, var(--dim));
+}
+
+/*
+ * The icon turns while the loop is running.
+ *
+ * `motion-safe` in spirit: anyone who has asked their system to stop animating
+ * things gets a still icon, and loses nothing, because the border already says the
+ * loop is running and so does the iteration count.
+ */
+.loop.running .loop-icon {
+  color: var(--run);
+  animation: spin 2.4s linear infinite;
+}
+
+/*
+ * The spin stays through the drain, because the final turn is genuinely running -
+ * a still icon over a turn that is mid-edit would be the same lie the old
+ * instant `stopped` was. Only the colour changes.
+ */
+.loop.stopping .loop-icon {
+  color: var(--halt);
+  animation: spin 2.4s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loop.running .loop-icon,
+  .loop.stopping .loop-icon {
+    animation: none;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/*
+ * The settings a loop departs from the defaults on, as quiet chips.
+ *
+ * Absent on the common case - trusted, always-on, default model - so a mark on a
+ * card always means a choice was made. The lock is tinted because it is the one
+ * with security meaning; the others stay in the card's grey.
+ */
+.loop-marks {
+  display: flex;
+  align-items: center;
+  /* Wrapping, not clipping: too many chips for one line grows the box (its
+     height is a minimum, see Canvas), and every chip stays readable. */
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  min-width: 0;
+  margin: 4px 0;
+}
+
+.loop-marks .mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+.loop-marks .mark svg {
+  width: 10px;
+  height: 10px;
+}
+
+/*
+ * The "ends" mark once the loop has actually ended itself. The same yellow the
+ * stopping drain uses, because they are the same story at two moments: the
+ * loop deciding to stop, and the loop having done so. Holds until the next
+ * start clears the status flag. Still, not breathing: it marks something that
+ * happened, where the waiting beacon below marks something happening.
+ */
+.loop-marks .mark-auto-stopped {
+  border-color: color-mix(in srgb, var(--halt) 55%, var(--line));
+  color: var(--halt);
+}
+
+/*
+ * The countdown on a timed run, beside the iteration count.
+ *
+ * Sized and coloured like the iteration number it sits with rather than as a
+ * badge of its own: the two are one reading - turns spent, time left - and a
+ * chip around half of it would split them. Tabular figures so a ticking second
+ * does not shuffle the text beside it.
+ */
+.countdown {
+  font-size: 11px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * The two clocks, stacked: time to the next turn above, the run's time limit
+ * below.
+ *
+ * A column so the two durations never run together into one line of digits.
+ * `baseline` alignment on the row above means the first line sits on the shared
+ * baseline with the iteration number and the second hangs below it, which is what
+ * makes a card with one clock identical to how it always looked and a card with
+ * two grow by exactly one small line.
+ */
+.clocks {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.35;
+}
+
+/*
+ * Past the deadline, before the turn in flight has finished. The same yellow as
+ * the drain it is about to become.
+ */
+.countdown.spent {
+  color: var(--halt);
+}
+
+/*
+ * Counting down to the next turn, and the moment it arrives.
+ *
+ * The paused border's green, the same colour the waiting and idling beacons use:
+ * this is the live half of the pair - something is about to happen - where the
+ * limit below it counts towards something ending. `due` is brighter for the second
+ * it lasts, because it marks the turn actually opening.
+ */
+.countdown.next {
+  color: color-mix(in srgb, var(--run) 75%, var(--dim));
+}
+
+.countdown.due {
+  color: var(--run);
+}
+
+/*
+ * The "waits" mark while the loop is actually paused on an empty queue. The
+ * paused border's green, and gently breathing, because this is a live state:
+ * the loop is up and takes the next turn by itself the moment an item lands.
+ */
+.loop-marks .mark-waiting-now {
+  border-color: color-mix(in srgb, var(--run) 55%, var(--line));
+  color: var(--run);
+  animation: beacon-breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes beacon-breathe {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loop-marks .mark-waiting-now {
+    animation: none;
+  }
+}
+
+.loop-marks .mark-mcp {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  color: color-mix(in srgb, var(--accent) 70%, var(--text));
+}
+
+/*
+ * The member count. Grey while the cluster is down, green while members are up.
+ *
+ * The same two-tone rule as `waits` and `ends` - grey is the setting, colour is the
+ * event - so the chip row has one grammar rather than one per chip. Not breathing,
+ * unlike the waiting beacon: this counts something rather than announcing a state
+ * the operator might be waiting on, and a pulsing number is harder to read.
+ *
+ * Tabular figures because the number changes while you watch it: a scaled cluster
+ * going from `3 of 8` to `4 of 8` should not shuffle the chips beside it.
+ */
+.loop-marks .mark-cluster {
+  font-variant-numeric: tabular-nums;
+}
+
+.loop-marks .mark-cluster-live {
+  border-color: color-mix(in srgb, var(--run) 55%, var(--line));
+  color: var(--run);
+}
+
+/* Model ids run long; the name yields rather than pushing the chip row wide. */
+.loop-marks .mark-model {
+  min-width: 0;
+}
+
+.loop-marks .mark-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.loop-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.loop-foot .start:hover {
+  border-color: var(--run);
+}
+
+.loop-foot .stop {
+  border-color: var(--stop);
+  color: var(--stop);
+}
+
+.iteration {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * "final iteration, shutting down gracefully", beside the iteration count.
+ *
+ * Beside the iteration count, lowercase and allowed to wrap: it is a sentence
+ * meant to be read calmly, not a badge, and the box grows rather than clipping
+ * it. The same yellow as the border, so the two agree about what they are saying.
+ * Smaller and unbolded than the badges around it, for the same reason it is a
+ * sentence: it informs, it does not shout.
+ */
+.shutting-down {
+  font-size: 9px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--halt);
+}
+
+/*
+ * The two dots: work arrives at the left, leaves from the right.
+ *
+ * Same size and position on both edges so the pairing is obvious, and both sit
+ * exactly where the wire attaches (see inAnchor/outAnchor in geometry.ts), so a
+ * curve meets a dot rather than an arbitrary point on the border.
+ *
+ * Pinned to half of NODE_H rather than half of the box, because a box with a
+ * wrapped chip row is taller than NODE_H and geometry.ts still attaches its
+ * curves at the standard midline. `50%` would drift the dot away from its wire
+ * on exactly the cards that grew. The height arrives as a custom property from
+ * the same constant the geometry uses, so the two cannot fall out of step.
+ */
+.port-in,
+.port-out {
+  position: absolute;
+  top: calc(var(--node-h) / 2);
+  width: 13px;
+  height: 13px;
+  margin-top: -6px;
+  background: var(--bg);
+  border: 2px solid var(--line-strong);
+  border-radius: 50%;
+}
+
+.port-in {
+  left: -7px;
+  /* A marker, not a control: the whole box is the drop area. */
+  pointer-events: none;
+}
+
+.port-out {
+  right: -7px;
+  cursor: crosshair;
+}
+
+/* A connected side is filled in, so you can see at a glance what is hooked up. */
+.port-in.wired,
+.port-out.wired {
+  background: var(--line-strong);
+}
+
+.port-out:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* --------------------------------------------------------------------- panel */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px;
+  background: var(--surface);
+  border-left: 1px solid var(--line);
+  min-height: 0;
+  /* Width is set inline from the resize state; never let content push it wider. */
+  flex: 0 0 auto;
+  min-width: 0;
+  /*
+   * Not clipped while open, which the grant dropdowns depend on.
+   *
+   * This used to be `hidden` at all times, for the fold below, and it quietly ate
+   * the left edge of any menu wider than the space between its trigger and the
+   * panel's edge - including the checkboxes, which sit on that edge. The symptom
+   * was a menu of labels with no boxes, and it came and went with the width of the
+   * summary that opened it: `MCPs: all` is narrower than `MCPs: 2 of 22`, so the
+   * right-anchored menu hung further past the panel and lost more of itself.
+   *
+   * A dropdown painting over the canvas is correct, so the clip belongs to the
+   * folded state alone.
+   */
+  overflow: visible;
+  /*
+   * The fold. Same curve and duration as the flock dashboard's environment column,
+   * because they are the same gesture and should feel the same.
+   */
+  transition: width 0.28s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease;
+}
+
+/*
+ * Folded shut. `!important` beats the inline width, which is the operator's chosen
+ * size and has to survive being folded - reopening returns to it rather than to a
+ * default.
+ *
+ * `visibility: hidden` is what takes the panel's buttons out of the tab order while
+ * it is shut; opacity alone would leave them focusable behind nothing.
+ */
+.panel.collapsed {
+  width: 0 !important;
+  min-width: 0;
+  padding-left: 0;
+  padding-right: 0;
+  border-left-width: 0;
+  opacity: 0;
+  visibility: hidden;
+  /* Clipped only here, so the contents do not spill across the canvas as it folds. */
+  overflow: hidden;
+}
+
+/*
+ * The divider. Wider than it looks: the visible line is 1px but the grab area is
+ * 7px, because a 1px drag target is a game rather than a control.
+ */
+.resizer {
+  flex: 0 0 7px;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+}
+
+/* Shut, the divider is only a rail for the arrow: there is nothing left to drag. */
+.resizer.collapsed {
+  cursor: default;
+}
+
+/* Dragging beats animating: see the `dragging` class in FactoryView. */
+.body:has(.resizer.dragging) .panel {
+  transition: none;
+}
+
+.resizer::after {
+  content: '';
+  position: absolute;
+  inset: 0 3px;
+  background: var(--line);
+}
+
+.resizer:hover::after,
+.resizer:active::after {
+  background: var(--accent);
+}
+
+.panel .empty {
+  color: var(--dim);
+  margin: 0;
+}
+
+/*
+ * The loop panel's two halves, around the draggable split.
+ *
+ * The top half is the loop's name and prompt; the bottom half is what it is
+ * *doing*: the log and the chat. The settings row sits between them, outside
+ * both, so dragging the split up never costs the operator a control - only
+ * reference material gives way. The bottom holds the height the operator gave
+ * it and the top takes what is left, because once the prompt is written the
+ * log is where the attention lives and the split is how it gets the room.
+ *
+ * Squeezed past what it can show, it scrolls. It used to be a size container so
+ * that a `@container` rule could hide the prompt below a threshold, and that was
+ * the wrong answer twice over: the prompt vanished while the divider still had
+ * most of its travel left, which reads as losing your work rather than folding it
+ * away, and the containment made this element a stacking context that trapped the
+ * reference menu underneath the settings row. The prompt is the thing the operator
+ * is editing - it stays, and the half scrolls like any other overflowing box.
+ */
+.panel-top {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  flex: 1 1 auto;
+  /*
+   * The floor is the name row. Dragged all the way up, the top half used to
+   * reach zero and simply vanish - which reads as "the prompt is gone", not
+   * "the prompt is folded". One always-visible line of name and its two buttons
+   * is the marker that the rest is still there, a scroll away.
+   */
+  min-height: 48px;
+  overflow-y: auto;
+}
+
+/*
+ * Inside the split, the prompt gives way rather than forcing a scroll: it fills
+ * whatever the top half has, down to a floor where it stops being an editor.
+ * The fixed height it has elsewhere would make the divider move everything
+ * except the one thing being resized.
+ *
+ * Below that floor the box holds its size and `.panel-top` scrolls instead -
+ * which is what `flex-shrink: 0` is for. A flex item ignores its own `min-height`
+ * in a container that is itself out of room unless told not to shrink, and
+ * without it the prompt kept compressing into a two-line slot with a scrollbar.
+ */
+.panel-top .prompt-box {
+  flex: 1 0 auto;
+  height: auto;
+  min-height: 100px;
+}
+
+.panel-bottom {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /*
+   * This half holds the height it is given; the half above is the one that gives.
+   *
+   * It used to be allowed to shrink, as a guard: a stored split too big for the
+   * window would otherwise push the chat box off the bottom. But two shrinkable
+   * halves share a deficit in proportion to their sizes, so neither reaches its own
+   * floor - dragged all the way up, the top half stopped at around 105px with its
+   * 48px floor never touched, and the divider felt stuck for no visible reason.
+   *
+   * The guard now lives where it can be exact: `splitMax` in FactoryView measures
+   * what the column can actually give and clamps the stored value into range, so a
+   * remembered number can never over-constrain this. With that in place the top half
+   * absorbs the whole squeeze and lands on its floor, which is what "all the way up"
+   * is supposed to mean.
+   */
+  flex: 0 0 auto;
+  min-height: 160px;
+  /*
+   * The same curve as every fold here, so the arrow's jump between the two
+   * divider positions moves like the panels do.
+   */
+  transition: height 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Dragging beats animating, as with the other two dividers. */
+.panel:has(.panel-split.dragging) .panel-bottom {
+  transition: none;
+}
+
+/*
+ * The split itself: the same 7px grab area as every other divider here, drawn
+ * as a 1px rule. No fold arrow - both halves are load-bearing, so neither
+ * collapses; double-click resets to half the window instead.
+ */
+.panel-split {
+  flex: 0 0 7px;
+  cursor: row-resize;
+  background: transparent;
+  position: relative;
+}
+
+.panel-split::after {
+  content: '';
+  position: absolute;
+  inset: 3px 0;
+  background: var(--line);
+}
+
+.panel-split:hover::after,
+.panel-split:active::after,
+.panel-split.dragging::after {
+  background: var(--accent);
+}
+
+/*
+ * The split's jump control: the file panel's arrow, quieter.
+ *
+ * Smaller and borderless-until-hovered because it is a shortcut between two
+ * divider positions, not a fold - both halves are always there, so it carries
+ * less weight than the arrows that make things disappear. Down when clicking
+ * gives the prompt the room, up when it goes back to the even split: the same
+ * one glyph rotated a quarter turn, so the two directions cannot drift apart.
+ */
+.split-arrow {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--dim);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.split-arrow:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.split-arrow .icon {
+  transform: rotate(90deg);
+  transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.split-arrow.closed .icon {
+  transform: rotate(270deg);
+}
+
+.panel .name,
+.panel .prompt {
+  background: var(--sunken);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font: inherit;
+  width: 100%;
+}
+
+.panel .name {
+  color: #ffffff;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+/*
+ * The loop's name, and the actions that belong to the loop rather than to the
+ * canvas: save it to the library, or delete it. Same shape as `.wire-head` - the
+ * title takes the row and the buttons sit at the end of it - because they are the
+ * same idea, each panel owning what can be done to the thing it describes.
+ */
+.loop-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/*
+ * A button that is only its icon.
+ *
+ * Square, so the glyph is centred rather than sitting in a box the width of a
+ * label that is not there, and sized off the icon so it stays beside a field
+ * without setting the row's height.
+ */
+button.icon-only {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  padding: 0;
+  width: 30px;
+  height: 30px;
+  color: var(--dim);
+}
+
+button.icon-only:hover:not(:disabled) {
+  color: #ffffff;
+}
+
+/* Saved. Green for the moment it is showing, then it is a bookmark again. */
+button.icon-only.saved,
+button.icon-only.saved:hover {
+  color: var(--run);
+  border-color: var(--run);
+}
+
+.panel .name:focus,
+.panel .prompt:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/*
+ * The prompt box: a highlighted `pre` with a transparent textarea on top of it.
+ *
+ * Every metric that affects where a line wraps is set once, on both elements
+ * together, because the illusion only holds while the two lay text out
+ * identically. Change the font here and both change; change it on one and the
+ * highlight drifts a character further out on every line.
+ */
+.prompt-box {
+  position: relative;
+  height: 260px;
+}
+
+.panel .prompt,
+.prompt-back {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  tab-size: 2;
+}
+
+.prompt-back {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: var(--sunken);
+  color: var(--text);
+  border-color: transparent;
+  pointer-events: none;
+}
+
+.panel .prompt {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  resize: none;
+  background: transparent;
+  /* The text is read off the layer below; only the caret comes from here. */
+  color: transparent;
+  caret-color: var(--text);
+}
+
+/* The selection has to stay visible even though the text itself is transparent. */
+.panel .prompt::selection {
+  background: rgba(144, 70, 255, 0.4);
+}
+
+/*
+ * The four kinds of reference a prompt can make: the project, a queue in, a queue
+ * out, a tool.
+ *
+ * An `@something` that matches none of them is left the colour of ordinary text on
+ * purpose: it is the only signal that the name will not resolve, and it is worth
+ * more than a fifth colour would be.
+ */
+
+/*
+ * The two directories, `@project` and `@loop`: white.
+ *
+ * White rather than a hue of their own, because they are not a choice the way the
+ * other three are - there is one project and one folder per loop, so there is
+ * nothing to check at a glance. What they do need is to read as a reference at all,
+ * and ordinary text colour did not do that: bold alone looked like emphasis on a
+ * word rather than a token that resolves to a path. Brighter than the prose is the
+ * smallest thing that separates them from it without adding a fifth colour.
+ */
+.tok-dir {
+  color: #fff;
+  font-weight: 700;
+}
+
+.tok-in {
+  color: var(--run);
+  font-weight: 700;
+}
+
+.tok-out {
+  color: var(--accent-soft);
+  font-weight: 700;
+}
+
+/*
+ * A parameter. The one token whose value is substituted into the text rather than
+ * explained beside it, and the only saturated colour in the set - see `--param`.
+ */
+.tok-param {
+  color: var(--param);
+  font-weight: 700;
+}
+
+.tok-mcp {
+  color: var(--marker);
+  font-weight: 700;
+}
+
+/*
+ * A skill, and a steering file. Neither grants nor substitutes anything - the
+ * agent already carries both - so the tint marks "this name is understood" the
+ * way the tool tint does, one hue per kind. See the palette note on `--skill`.
+ */
+.tok-skill {
+  color: var(--skill);
+  font-weight: 700;
+}
+
+.tok-steer {
+  color: var(--steer);
+  font-weight: 700;
+}
+
+/*
+ * Zero-width, and only in the mirror. This exists to be measured: it is where the
+ * caret is, which is where the reference menu opens.
+ */
+.prompt-caret {
+  display: inline-block;
+  width: 0;
+}
+
+/* -------------------------------------------------------- the reference menu */
+
+/*
+ * Opens at the caret, and lives on the body rather than in the prompt box.
+ *
+ * `fixed` because it is portalled - see the note in `PromptBox`. It used to be
+ * `absolute` inside `.prompt-box` and could not work there: `.panel-top` scrolls,
+ * so a menu hanging below the box was cut off at the half's edge. It was also a
+ * size container at the time, and that containment made it a stacking context that
+ * trapped the menu's `z-index` under the settings row. The container has since
+ * gone for its own reasons, but the scroll clip has not and cannot - that overflow
+ * is what makes the half scrollable at all.
+ *
+ * `top`, `left` and `max-height` all come from the placement code in viewport
+ * coordinates, clamped to the window on every edge, so this rule carries no
+ * position of its own.
+ *
+ * One fixed `width`, not the `min-width` with `max-width: 100%` it had. That
+ * percentage meant the prompt box, and on the body it would mean the window; more
+ * importantly the placement code has to know the width to keep the menu inside the
+ * screen, and a menu free to grow past the constant it clamps against is a menu
+ * that hangs off the right edge by however much it grew. `MENU_WIDTH` in
+ * FactoryView is this number, and the two have to stay equal.
+ *
+ * Above every other layer in the app: the grant dropdowns sit at 30 and the tab
+ * menu at 40, and this opens over both - it is the frontmost thing on screen while
+ * it is up, and it is dismissed by typing.
+ */
+.ref-menu {
+  position: fixed;
+  z-index: 60;
+  width: 220px;
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  list-style: none;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+}
+
+.ref-menu ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ref-group + .ref-group {
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+  padding-top: 4px;
+}
+
+.ref-head {
+  padding: 3px 8px;
+  color: var(--dim);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.ref-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.ref-item.on {
+  background: var(--sunken);
+}
+
+/*
+ * The token, which is the thing being chosen and so the thing that gives way last.
+ *
+ * Truncated rather than allowed to widen the row: the menu is a fixed width now
+ * (see above), so a long MCP server name has to go somewhere and an ellipsis on
+ * the end of it is the only option that does not either push the hint off the row
+ * or push the menu off the screen. `min-width: 0` because a flex item refuses to
+ * shrink below its content without it, which would make the ellipsis unreachable.
+ */
+.ref-token {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}
+
+/*
+ * The hint is what the reference resolves to, so it defers to the name - but it
+ * does not shrink. It is already the short form of everything it says (see
+ * `shortDir`), so there is nothing left to take off it; the token above has the
+ * characters to spare.
+ */
+.ref-hint {
+  flex: none;
+  margin-left: auto;
+  color: var(--dim);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/*
+ * The one setting in the panel that is a switch rather than a field.
+ *
+ * The whole label is the hit area, and the explanation sits under it indented to
+ * the box's text so the two read as one block rather than as a control with a
+ * stray paragraph after it. `accent-color` is the whole of the checkbox styling:
+ * the native control already knows how to be focused, checked and touched, and
+ * replacing it with a div would mean earning all of that back.
+ */
+.loop-settings {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 2px;
+}
+
+/*
+ * Room for the steppers' labels, which hang above the row out of flow.
+ *
+ * Only when there is a stepper in it: four of the five run modes have no number
+ * beside them, and reserving the space unconditionally would leave a permanent
+ * empty strip above the row for a label that is usually not there. The row gap
+ * grows to match, so a label on a wrapped second line clears the boxes on the
+ * first instead of sitting on top of them.
+ */
+.loop-settings:has(.stepper) {
+  padding-top: 13px;
+  row-gap: 17px;
+}
+
+/*
+ * The same reservation for the grant strip: `Save as default` and the grant hint
+ * both hang above their chip out of flow, for the reason `.stepper-unit` does - a
+ * control two rows tall would centre its whole self against its neighbours and drop
+ * every chip beside it half a line out of alignment.
+ *
+ * Deeper than the stepper's strip because what hangs here is a control rather than a
+ * word: it carries its own padding and border. The two are mutually exclusive in the
+ * markup, so this never has to fit both at once, and a row holding a stepper as well
+ * keeps whichever reservation is larger rather than adding them.
+ */
+.loop-settings:has(.grant-strip) {
+  padding-top: 19px;
+  row-gap: 20px;
+}
+
+/*
+ * The cluster's row, above the settings row and marked off from it.
+ *
+ * A tinted band with a purple left edge, which is the only decorated row in the
+ * panel. It earns that: everything in `loop-settings` below configures one session,
+ * and this says how many sessions there are - a prior question, and the one that
+ * changes what every control under it applies to. Undecorated and directly above,
+ * the two rows read as one wrapped row of six controls.
+ *
+ * The purple is the same accent the flock badge and the MCP chips use, so the row
+ * belongs to the same family rather than introducing a colour.
+ */
+.cluster-settings {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 2px;
+  /*
+   * The top is deeper than the bottom, and unevenly on purpose: the size stepper's
+   * label hangs above the row out of flow, and this is the band it hangs into. A
+   * cluster always has that stepper, so unlike `.loop-settings` there is no case to
+   * make it conditional on.
+   */
+  padding: 17px 9px 6px;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 0 6px 6px 0;
+}
+
+/* Sized to their content: two short dropdowns and a stepper, not a form. */
+.cluster-settings select {
+  flex: 0 0 auto;
+  width: auto;
+}
+
+/*
+ * The whole row goes inert while the cluster runs. See `ClusterSettings`.
+ *
+ * The same 0.4 every other disabled control in the app fades to, said here as well
+ * as relying on the platform's own greying: a native select does dim itself, but not
+ * by the amount the buttons beside it do, and a row that is half the app's grey and
+ * half the platform's does not read as one thing being switched off.
+ */
+.cluster-settings select:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* A setting that is doing nothing, said quietly. See the scaled/no-wires note. */
+.cluster-settings .hint {
+  font-size: 11px;
+  font-style: italic;
+  color: var(--dim);
+}
+
+/*
+ * The member strip: one tab per session, above the log it switches.
+ *
+ * Scrolls sideways rather than wrapping. Sixteen tabs wrapped to three rows would
+ * push the log down by a third of the panel every time you looked at a large
+ * cluster, and the strip is navigation - it should cost one row, always. A flick
+ * over it scrolls, which is what a row of tabs is expected to do.
+ */
+.member-strip {
+  display: flex;
+  flex: none;
+  /* No gap: the cells share edges. See `.member-tab`. */
+  gap: 0;
+  /* Only the bar's own width, so the cells do not stretch across the panel. */
+  align-self: flex-start;
+  max-width: 100%;
+  margin-bottom: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.member-strip::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * One cell of the node bar, not a chip.
+ *
+ * Square and edge-to-edge, so the nodes read as one segmented control rather than as
+ * a row of independent buttons. That is the truer shape: the cells are not separate
+ * things you can act on, they are positions in one cluster and exactly one of them
+ * is being looked at - which is a segmented control's entire meaning, and a row of
+ * detached pills says the opposite.
+ *
+ * The shared edge is a 1px overlap rather than a dropped border, so every cell keeps
+ * a full outline and the active one can colour all four sides of its own. Dropping
+ * `border-right` instead would leave the last cell before the selection with nothing
+ * to colour and the selection's left edge doing double duty.
+ *
+ * A minimum width so `n1` and `n16` occupy the same cell: uneven cells in a bar read
+ * as a layout accident, where in a row of pills they read as fine.
+ */
+.member-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  flex: none;
+  position: relative;
+  min-width: 44px;
+  margin-left: -1px;
+  padding: 4px 8px;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: 0;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+  cursor: pointer;
+}
+
+/* Only the bar's outer corners are rounded, which is what makes it one object. */
+.member-tab:first-child {
+  margin-left: 0;
+  border-radius: 6px 0 0 6px;
+}
+
+.member-tab:last-child {
+  border-radius: 0 6px 6px 0;
+}
+
+.member-tab:hover {
+  /* Above its neighbours, so the overlapped edge is this cell's and not the one
+     next door's - without it a hover or a selection shows three coloured sides. */
+  z-index: 1;
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+/* The one being read. Filled rather than outlined, so it reads as the current
+   page and not as another option that happens to be highlighted. */
+.member-tab.on {
+  z-index: 2;
+  background: color-mix(in srgb, var(--accent) 26%, var(--sunken));
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+/*
+ * The dot: this member is up.
+ *
+ * Green and still while the member is live, breathing while it is actually mid-turn.
+ * The two states are worth separating here in a way they are not on the card - the
+ * card has a border and a spinning glyph to say it, the strip has eleven pixels - and
+ * "which of my members are actually working" is the question the strip exists for.
+ */
+.member-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--run);
+}
+
+.member-tab.live {
+  border-color: color-mix(in srgb, var(--run) 45%, var(--line));
+}
+
+.member-tab.working .member-dot {
+  animation: beacon-breathe 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .member-tab.working .member-dot {
+    animation: none;
+  }
+}
+
+.loop-settings .setting {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+
+/*
+ * The checkbox, drawn here rather than by the platform.
+ *
+ * `accent-color` on a native control was not survivable: the checked state
+ * painted nothing at all inside the grant menus - box and tick both - so a list
+ * with everything granted read as a list of plain labels nobody could see was
+ * clickable. Whatever the platform was doing there, it is not worth diagnosing
+ * when the control is a square, a border and a tick.
+ *
+ * `appearance: none` drops the native painting entirely and the three states are
+ * drawn below: empty, checked, and checked-but-not-yours-to-change. The element
+ * is still a real checkbox, so focus, keyboard and the label's click target all
+ * keep working.
+ */
+.loop-settings input[type='checkbox'] {
+  appearance: none;
+  flex: none;
+  display: inline-grid;
+  place-content: center;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  background: var(--sunken);
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.loop-settings input[type='checkbox']:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.loop-settings input[type='checkbox']:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* The tick: two borders of a rotated box, which is a check at any size. */
+.loop-settings input[type='checkbox']:checked::after {
+  content: '';
+  width: 3px;
+  height: 7px;
+  margin-top: -2px;
+  border: solid #ffffff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+/*
+ * Granted, but not by a decision made here - everything while `All servers` is
+ * ticked, and a `@`-named server always. Still plainly ticked, just visibly not
+ * a control: grey rather than accent, and no pointer.
+ */
+.loop-settings input[type='checkbox']:disabled {
+  cursor: default;
+  border-color: var(--line);
+}
+
+.loop-settings input[type='checkbox']:checked:disabled {
+  background: color-mix(in srgb, var(--dim) 55%, var(--sunken));
+  border-color: transparent;
+}
+
+.loop-settings input[type='checkbox']:focus-visible {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: 1px;
+}
+
+/*
+ * The grant lists: MCP servers, and built-in tools.
+ *
+ * A native <details> rather than a hand-rolled popover: the platform brings the
+ * open/close, the outside-click is a summary click away, and there is no focus
+ * management to earn back. The menu is absolutely positioned so opening it does
+ * not push the log down.
+ */
+.mcp-pick {
+  position: relative;
+}
+
+.mcp-pick summary {
+  list-style: none;
+  padding: 2px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--dim);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.mcp-pick summary::-webkit-details-marker {
+  display: none;
+}
+
+.mcp-pick summary:hover,
+.mcp-pick[open] summary {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.mcp-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 220px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/*
+ * What hangs above a grant chip: the offer to keep it, and the nudge to set it.
+ *
+ * Both out of flow, in the strip `.loop-settings:has(.grant-strip)` reserves, and
+ * both anchored to the chip's own `position: relative` rather than to the row - so
+ * neither needs to know where its chip ended up after the row wrapped.
+ *
+ * `bottom: 100%` puts them above, which also keeps them clear of the menu: that
+ * opens downward from the same box.
+ */
+/*
+ * The chip's own box, so its note has something to hang from.
+ *
+ * Takes the chip's place as the flex item in the settings row and is exactly the
+ * chip's size, so the row is unchanged - see `GrantSlot` for why the note cannot
+ * simply live inside the `<details>`.
+ */
+.grant-slot {
+  position: relative;
+  display: flex;
+}
+
+.grant-strip {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  margin-bottom: 3px;
+  white-space: nowrap;
+  font-size: 10.5px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+/*
+ * Quiet until wanted. A dashed underline rather than a border or a filled chip,
+ * because this sits above a row of bordered chips and a second bordered thing in the
+ * strip above them reads as another control in the row rather than as a note about
+ * one.
+ */
+.save-default {
+  padding: 1px 2px;
+  border: 0;
+  background: none;
+  color: var(--dim);
+  text-decoration: underline dashed;
+  text-underline-offset: 2px;
+}
+
+.save-default:hover {
+  color: var(--accent);
+}
+
+.save-default:focus-visible {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: 1px;
+  border-radius: 3px;
+}
+
+/*
+ * The hint, which is the one thing in the panel that speaks first.
+ *
+ * Tinted in the accent rather than dimmed like everything else in this strip,
+ * because it has to be noticed once - it is the only place the app says out loud
+ * that a new loop is deliberately narrow. Small and low-contrast enough not to
+ * become furniture, since it appears for every new loop.
+ *
+ * One pill holding two buttons, because it is asking one question with two answers:
+ * the text dismisses it for now, `Keep` saves the grant as the default and ends it
+ * for good. The pill is the tinted thing; the buttons inside are bare so the whole
+ * reads as a single note, and the divider between them is the only sign there are
+ * two targets until the pointer is over one.
+ */
+.grant-hint {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+  color: color-mix(in srgb, var(--accent) 30%, var(--text));
+}
+
+.grant-hint:hover {
+  border-color: var(--accent);
+}
+
+.grant-hint > button {
+  padding: 1px 6px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.grant-hint > button:hover {
+  color: var(--text);
+}
+
+.grant-hint > button:focus-visible {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: -2px;
+  border-radius: 4px;
+}
+
+.grant-hint-keep {
+  border-left: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  font-weight: 600;
+}
+
+.mcp-menu label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+/*
+ * `All`: the way back to trusting the machine's config.
+ *
+ * Deliberately styled as one of the options rather than as a heading. It had a
+ * bold label and a rule under it, and that read as a section title - a row whose
+ * checkbox nobody would think to click. Same weight and size as the servers
+ * below it now, separated by a hairline that sits in the gap rather than on the
+ * text, so it is plainly another checkbox that happens to govern the rest.
+ */
+.mcp-menu label.all {
+  padding-bottom: 8px;
+  margin-bottom: 1px;
+  border-bottom: 1px solid var(--line);
+}
+
+/*
+ * A row that reports a grant rather than offering a choice: everything while
+ * `All servers` is ticked, and a `@`-named server always. Dimmed and not
+ * clickable, so the list distinguishes what is granted from what is yours to
+ * pick - and the way to pick is to untick All first.
+ */
+.mcp-menu label.fixed {
+  color: var(--dim);
+  cursor: default;
+}
+
+.mcp-menu p {
+  margin: 0;
+  color: var(--dim);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/*
+ * A row of the skills or steering menu: a button, because clicking it acts on the
+ * prompt rather than toggling anything. Laid out like the checkbox rows around it
+ * so the settings menus read as one family, with the hint pushed to the right the
+ * way the reference menu does it.
+ */
+.mcp-menu button.res-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 2px 0;
+  background: none;
+  border: none;
+  font-size: 12.5px;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.mcp-menu button.res-row:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.mcp-menu button.res-row code {
+  font-weight: 700;
+}
+
+/* A name that cannot be written after `@` - listed, dimmed, and not for clicking. */
+.mcp-menu button.res-row.unref {
+  cursor: default;
+}
+
+.mcp-menu button.res-row.unref code {
+  color: var(--dim);
+  font-weight: 400;
+}
+
+.res-hint {
+  margin-left: auto;
+  color: var(--dim);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+/* Already named in the prompt: the row reports the fact and offers nothing. */
+.res-tick {
+  color: var(--run);
+  font-size: 11.5px;
+}
+
+/* The model select, in the library picker's clothes but panel-sized. */
+select.model-pick {
+  appearance: none;
+  background-color: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 2px 22px 2px 9px;
+  font-size: 12px;
+  color: var(--dim);
+  cursor: pointer;
+  max-width: 220px;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='6' viewBox='0 0 8 6'><path d='M0 0l4 6 4-6z' fill='%23888'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+}
+
+select.model-pick:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+select.model-pick:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+select.model-pick option {
+  background: var(--surface);
+  color: var(--text);
+}
+
+/*
+ * Discovery failed, so this is a button in the select's clothes.
+ *
+ * The same box as the picker it stands in for, without the chevron, because there is
+ * nothing to drop down - it holds the spot in the settings row and reads as the
+ * control that is not working rather than as a new one that appeared. Warning
+ * coloured, not error coloured: nothing is broken, a list is missing.
+ */
+button.model-pick.failed {
+  appearance: none;
+  background: transparent;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  padding: 2px 9px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--dim);
+  cursor: pointer;
+  max-width: 220px;
+}
+
+button.model-pick.failed:hover {
+  border-color: var(--warn, var(--accent));
+  color: var(--text);
+}
+
+button.model-pick.failed:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/*
+ * The counted run modes' number, beside the select that revealed it.
+ *
+ * Small on purpose. It shares a row with the mode, the MCP scope, the tools and
+ * the model, and the number is the least of those - a full-width input with the
+ * platform's own spinners would be the loudest control in the panel for the
+ * smallest decision. So the native spinners go and a stacked pair of 15px
+ * arrows takes their place on the field's trailing edge, joined to it with no
+ * gap so the three read as one control. The shape kiro-flock's cluster
+ * settings use, for the same reason.
+ *
+ * The unit sits above the field rather than trailing it, which is what the
+ * `position: relative` is for. It used to trail, and the word was then the widest
+ * part of a row that already wrapped onto a second line on a narrow panel - the
+ * most horizontal space in the panel spent on the least information, since a label
+ * is read once and the number is read every time.
+ *
+ * This element stays the field's own row, in flow and one line tall. Making it a
+ * two-row column instead is the obvious way to stack a label over a field and it
+ * misaligns the row: `.loop-settings` centres its items, so a control twice as tall
+ * as its neighbours centres its *whole self* against them and the field lands half
+ * a line below every select beside it. The label goes out of flow instead, and the
+ * row is back to being one line of equal-height boxes with some writing above two
+ * of them.
+ */
+.stepper {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  flex: none;
+}
+
+.stepper input {
+  /* Four characters wide: the hours ladder starts at `0.05`, and a field that
+     clipped its own smallest value would be the one thing here worth fixing. */
+  width: 44px;
+  padding: 2px 4px;
+  border: 1px solid var(--line);
+  border-right: none;
+  border-radius: 6px 0 0 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: center;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.stepper input::-webkit-inner-spin-button,
+.stepper input::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+.stepper input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+/*
+ * Inert, on the wrapper, so the number, the arrows and the unit fade together.
+ *
+ * Fading the parts individually is what makes a small composite control look broken
+ * rather than switched off: three elements at 0.4 each still have three separate
+ * edges, and the unit label - plain text with no disabled state of its own - would
+ * have stayed bright beside them. One opacity over the whole shape keeps it one
+ * shape.
+ */
+.stepper.disabled {
+  opacity: 0.4;
+}
+.stepper.disabled input,
+.stepper.disabled button {
+  cursor: default;
+}
+
+.stepper-arrows {
+  display: flex;
+  flex-direction: column;
+}
+
+.stepper-arrows button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 12px;
+  padding: 0;
+  border: 1px solid var(--line);
+  background: var(--sunken);
+  color: var(--dim);
+  cursor: pointer;
+  line-height: 1;
+}
+
+.stepper-arrows button:first-child {
+  border-radius: 0 6px 0 0;
+  border-bottom: none;
+}
+
+.stepper-arrows button:last-child {
+  border-radius: 0 0 6px 0;
+}
+
+/* Not while disabled: an arrow that lights up under the pointer is an arrow
+   offering to do something, and this one is refusing. */
+.stepper-arrows button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+/*
+ * The chevron is a right-pointing one turned a quarter, the same trick the panel
+ * folds use: one glyph, two directions, and no second path to keep in step.
+ */
+.stepper-arrows button svg {
+  width: 9px;
+  height: 9px;
+}
+
+.stepper-arrows button:first-child svg {
+  transform: rotate(-90deg);
+}
+
+.stepper-arrows button:last-child svg {
+  transform: rotate(90deg);
+}
+
+/*
+ * `turns` / `hours` / `interval`: the number is a quantity, and a bare one reads
+ * as a code.
+ *
+ * Out of flow, resting on the field's top edge and indented to its text, so the
+ * pair reads as a labelled field while the field alone takes part in the row. The
+ * rows that contain a stepper reserve the space it hangs into - see the
+ * `:has(.stepper)` rules on `.loop-settings` and `.cluster-settings`, which is the
+ * one cost of taking it out of flow.
+ *
+ * `nowrap` because it has no width of its own to wrap within: an absolute box sized
+ * by its content would otherwise break `interval` across two lines the moment the
+ * field beside it was narrow.
+ */
+.stepper-unit {
+  position: absolute;
+  bottom: 100%;
+  left: 5px;
+  margin-bottom: 1px;
+  font-size: 10px;
+  line-height: 1.2;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  color: var(--dim);
+}
+
+.output {
+  flex: 1;
+  /*
+   * The log is what gives way when the bottom half is squeezed, and it has to be
+   * told so explicitly: a flex item will not shrink below its own `min-height`, so
+   * the 120px this used to carry made the half's true floor the sum of its children
+   * rather than the number on the half. Dragged to the bottom on a cluster - where
+   * the node strip takes another 38px - that sum came to 220 against a 180px half,
+   * and the overflow pushed the chat box off the screen.
+   *
+   * Which of the three gives is not arbitrary. The node strip and the chat box are
+   * controls: one says which session you are reading, the other is how you answer
+   * it, and neither has a smaller useful form. The log is reference, it already
+   * scrolls, and a short scroll is still a scroll. Same division as the half above,
+   * where the settings row holds its size and the prompt is what folds.
+   *
+   * Zero rather than a smaller floor, so no future row added to this half can
+   * reintroduce the overflow. What keeps the log from actually being a sliver is
+   * `SPLIT_MIN`, which stops the divider well above that point.
+   */
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.output .line.system {
+  color: var(--dim);
+}
+
+/* A tool call is the loop acting on the world, so it gets the accent. */
+.output .line.tool {
+  color: var(--accent-soft);
+}
+
+/*
+ * The iteration marker: the one structural break in the log.
+ *
+ * A turn is a fresh session with no memory of the last one, so the boundary
+ * between two of them is the most important thing in this scroll, and it used to
+ * be a grey line indistinguishable from "stopping after this turn". Space above,
+ * a rule below, and the only warm colour in the app.
+ */
+.output .line.iteration,
+.output .line.iteration-steered {
+  margin: 18px 0 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line-strong);
+  color: var(--marker);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+/*
+ * A turn opened by an operator message wears the operator's colour: between the
+ * green message above it and the answer below, the warm marker read as a stray
+ * heading in someone else's conversation. Same shape, different voice.
+ */
+.output .line.iteration-steered {
+  color: var(--run);
+  border-bottom-color: var(--run);
+}
+
+/* No leading gap when the marker opens the log. */
+.output .line.iteration:first-child,
+.output .line.iteration-steered:first-child {
+  margin-top: 0;
+}
+
+/*
+ * The operator speaking. Green, because the log needed a colour that is neither
+ * the agent's (plain), the machine's (dim), nor the turn marker's (the warm one)
+ * - and the bar on the left is what makes it read as a voice from outside the
+ * loop rather than one more thing the loop said.
+ */
+.output .line.user {
+  color: var(--run);
+  border-left: 3px solid var(--run);
+  padding-left: 8px;
+  margin: 8px 0;
+}
+
+/* ------------------------------------------------------------------- steer */
+
+/*
+ * The chat under the log: one message row, textarea and its send button, both
+ * one line tall. Stretch alignment keeps the two the same height without either
+ * naming a number the other would have to match.
+ */
+.steer {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+  flex: 0 0 auto;
+}
+
+.steer-input {
+  flex: 1;
+  resize: none;
+  background: var(--sunken);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  min-width: 0;
+}
+
+.steer-input:focus {
+  outline: none;
+  border-color: var(--run);
+}
+
+.steer-input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.steer-send {
+  flex: 0 0 auto;
+  padding: 7px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--sunken);
+  color: var(--run);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.steer-send:hover:not(:disabled) {
+  border-color: var(--run);
+}
+
+.steer-send:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ---------------------------------------------------------------- wire panel */
+
+.wire-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.wire-route {
+  flex: 1;
+  color: #ffffff;
+  font-size: 16px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wire-route .arrow {
+  color: var(--accent);
+  margin: 0 3px;
+}
+
+/*
+ * The confirm dialog.
+ *
+ * A native <dialog>, so the browser supplies the modality and this only has to
+ * supply the appearance: the panel's surface and border, a title, a line of
+ * explanation, and two buttons that say what they do. `::backdrop` is the
+ * element's own pseudo - no overlay div, no z-index bookkeeping.
+ *
+ * Sized to the sentence rather than to the viewport. These questions are two
+ * lines at most, and a dialog the width of the window to ask one of them reads as
+ * an error page.
+ */
+dialog.confirm {
+  max-width: 420px;
+  margin: auto;
+  padding: 18px 20px 16px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--line-strong);
+  border-radius: 11px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+}
+
+dialog.confirm::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+dialog.confirm h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+dialog.confirm p {
+  margin: 8px 0 0;
+  color: var(--dim);
+  font-size: 13px;
+  line-height: 1.5;
+  /* Paths and factory names are the usual content and they do not wrap kindly. */
+  overflow-wrap: anywhere;
+}
+
+/*
+ * The caveat that makes confirming probably wrong, boxed and amber so it cannot be
+ * read as another line of the body. Same `--halt` the directory bar and the
+ * graceful-drain state use: a warning, not an error, because the button still works.
+ */
+dialog.confirm p.confirm-warning {
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--halt) 45%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--halt) 12%, transparent);
+  color: var(--halt);
+}
+
+/*
+ * The harder answer, boxed and red so it reads as a different act than the
+ * buttons below it - the warning box's shape in the danger colour. The input is
+ * the safety: the button beside it stays dead until the keyword is typed, so
+ * this section cannot be triggered by aim alone.
+ */
+.confirm-danger {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--stop) 40%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--stop) 8%, transparent);
+}
+
+.confirm-danger p {
+  margin: 0;
+}
+
+.confirm-danger-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.confirm-danger-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 9px;
+  background: var(--sunken);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.confirm-danger-row input:focus {
+  outline: none;
+  border-color: var(--stop);
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+button.danger {
+  border-color: var(--stop);
+  color: var(--stop);
+}
+
+button.danger:hover:not(:disabled) {
+  background: var(--stop);
+  border-color: var(--stop);
+  color: var(--sunken);
+}
+
+.wire-dir {
+  color: var(--dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+}
+
+/* ---------------------------------------------------------------- wire mode */
+
+.wire-mode {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+/*
+ * The queue/topic control: two buttons joined into one.
+ *
+ * Joined rather than spaced because they are one choice with two positions, and
+ * the shared border is what says so. The pressed one takes the accent, so which
+ * mode is on is legible without reading either label.
+ */
+.seg {
+  display: flex;
+  align-self: start;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.seg button {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--dim);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.seg button + button {
+  border-left: 1px solid var(--line);
+}
+
+.seg button:hover:not(.on) {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.seg button.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+/* What the choice means for this wiring, named loops and all. */
+.wire-mode .hint {
+  margin: 0;
+  color: var(--dim);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+/*
+ * Locked while the loops run.
+ *
+ * The switch goes flat but the current mode does not, so the control still reads as
+ * a choice that has been made rather than as a dead row.
+ */
+.seg button:disabled {
+  color: var(--line-strong);
+  cursor: not-allowed;
+}
+
+.seg button:disabled:hover {
+  background: none;
+  color: var(--line-strong);
+}
+
+/* The reason, which is the part that makes the lock acceptable rather than annoying. */
+.wire-mode .hint.locked {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--marker);
+}
+
+.wire-mode .hint.locked .icon {
+  margin-top: 0.15em;
+}
+
+.queue {
+  flex: 1;
+  min-height: 120px;
+  overflow-y: auto;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px;
+}
+
+.stage + .stage {
+  margin-top: 14px;
+}
+
+.queue h3 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 7px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.queue h3 .count {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  margin-left: auto;
+}
+
+/*
+ * One subscriber's folder, inside a topic's outbox.
+ *
+ * A rule above each rather than a box around each: they are one list broken into
+ * sections, not several panels stacked, and the thing being compared is the items
+ * across them. Boxes would put two borders between neighbouring items and make the
+ * repetition - the same item under every heading - read as separate lists rather
+ * than as one delivery arriving everywhere.
+ */
+.outbox-group + .outbox-group {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.outbox-group > h3 {
+  /* The route carries the names, so it sets the case rather than the heading. */
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.outbox-group > h3 .wire-route {
+  flex: 0 1 auto;
+  font-size: 13px;
+}
+
+.outbox-group .wire-dir {
+  display: block;
+  margin: -2px 0 7px;
+}
+
+.outbox-group .empty {
+  display: block;
+  padding: 2px 0 4px;
+}
+
+.item {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 7px 9px;
+  margin-bottom: 7px;
+}
+
+.item-head {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-size: 12.5px;
+}
+
+.item-head .producer {
+  flex: 1;
+  color: var(--accent-soft);
+  font-weight: 600;
+}
+
+.item-head .ts {
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.item-body {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/*
+ * The selected wire, so clicking a curve gives visible feedback.
+ *
+ * Direct child only. On a shared queue that is the trunk, and the branch rule
+ * above thickens just the one branch that was clicked - so selecting a tap shows
+ * both the tap and the queue it is on, without lighting up its siblings.
+ */
+.wire.selected > .wire-line {
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+
+.wire.selected .wire-count rect {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+/* ------------------------------------------------------------------ tab strip */
+
+/*
+ * One row above the toolbar: the wordmark, a tab per open factory, and Import.
+ *
+ * These are folder tabs: rounded at the top, square at the bottom, and the active
+ * one is the same colour as the toolbar below it with no border between them. That
+ * last part is the whole illusion - the tab and the toolbar read as one surface, so
+ * the tab looks like the front of the thing you are looking at rather than a button
+ * that happens to be selected.
+ *
+ * It is done with a 1px negative bottom margin: the strip draws a bottom border, and
+ * the active tab sits one pixel over it and paints across it. No pseudo-elements, no
+ * masks, and nothing that breaks when the toolbar's colour changes, because the tab
+ * takes its colour from the same variable the toolbar does.
+ */
+.tabstrip {
+  display: flex;
+  /* Stretch, so the tabs reach the bottom edge of the strip and meet the toolbar. */
+  align-items: stretch;
+  gap: 9px;
+  padding: 8px 14px 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+
+/*
+ * Anything in the strip that is not a tab sits in the middle of it.
+ *
+ * `a.button` is in the list because Export is a link: without it the anchor takes
+ * the strip's `align-items: stretch` and grows to the full height of a tab, which
+ * puts its bottom border exactly on the strip's own.
+ */
+.tabstrip > .spacer,
+.tabstrip > button,
+.tabstrip > a.button,
+.tabstrip > .picker,
+.tabstrip > .error {
+  align-self: center;
+}
+
+/*
+ * Import and Export ride a little shorter than the tabs beside them, and a little
+ * higher.
+ *
+ * The strip has no bottom padding on purpose - a tab has to reach the bottom edge
+ * and paint over the border to join the toolbar below it - so a full-height control
+ * in here ends up sitting on that line. These two are not tabs and should not touch
+ * it: the height comes off the vertical padding, and the margin spends the slack
+ * below rather than centring it, so the border runs clear underneath.
+ */
+.tabstrip > button.with-icon,
+.tabstrip > a.button {
+  padding-top: 2px;
+  padding-bottom: 2px;
+  margin-bottom: 4px;
+}
+/*
+ * Open is the same control wearing a wrapper, so the rules above have to reach
+ * through it.
+ *
+ * `FolderPicker` wraps its button in a positioned `.picker` so the popover has
+ * something to anchor to, which puts the button one level below the strip and out of
+ * reach of every `.tabstrip > …` selector. Left alone it took the strip's `stretch`
+ * and grew to the full height of a tab while Import and Export beside it did not -
+ * one button visibly taller than its two siblings, for a reason invisible in the
+ * markup.
+ *
+ * The margin goes on the wrapper rather than the button, so the popover's anchor
+ * moves with it and the menu keeps its 6px gap from the control that opened it.
+ */
+.tabstrip > .picker {
+  margin-bottom: 4px;
+}
+.tabstrip > .picker > button.with-icon {
+  padding-top: 2px;
+  padding-bottom: 2px;
+}
+
+/* The scrollable row, its two scroll buttons, and the add button. */
+.tabs-wrap {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  gap: 4px;
+}
+
+.tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 3px;
+  min-width: 0;
+  /* Many factories scroll rather than squeezing every tab down to nothing. */
+  overflow-x: auto;
+  /* The row is scrolled by buttons and the wheel, so the bar itself is noise. */
+  scrollbar-width: none;
+}
+
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  max-width: 230px;
+  padding: 6px 6px 7px 11px;
+  /* One pixel over the strip's bottom border, so the active tab can cover it. */
+  margin-bottom: -1px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 9px 9px 0 0;
+  color: var(--dim);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.tab:hover:not(.active) {
+  /* Halfway between the strip and the toolbar: present, but not mistakable for the
+     active tab, which is the only one allowed to be --surface. */
+  background: #211d27;
+  color: var(--text);
+}
+
+.tab.active {
+  background: var(--surface);
+  border-color: var(--line);
+  color: #ffffff;
+  /* Above the strip's border, which it is painting over. */
+  z-index: 1;
+  /* The accent edge along the top, which is what marks the front tab. */
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+/* Tabs can be dragged into a new order. The one in flight fades so the row reads
+   as "this is being moved", and the tab under the pointer grows an accent edge on
+   the side the drop would land - an insertion mark, not a highlight, because the
+   question mid-drag is "where", not "which". */
+.tab.dragging {
+  opacity: 0.45;
+}
+
+.tab.drop-left {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.tab.drop-right {
+  box-shadow: inset -2px 0 0 var(--accent);
+}
+
+/* The active tab keeps its top edge while also showing where the drop lands. */
+.tab.active.drop-left {
+  box-shadow: inset 2px 0 0 var(--accent), inset 0 2px 0 var(--accent);
+}
+
+.tab.active.drop-right {
+  box-shadow: inset -2px 0 0 var(--accent), inset 0 2px 0 var(--accent);
+}
+
+.tab-icon {
+  color: var(--dim);
+}
+
+.tab.active .tab-icon {
+  color: var(--accent);
+}
+
+.tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A factory keeps running when you switch away from it, so the strip says which. */
+.tab-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--run);
+}
+
+.tab-close,
+.tab-add,
+.tab-scroll {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-color: transparent;
+  color: var(--dim);
+}
+
+.tab-close {
+  padding: 3px;
+  font-size: 13px;
+}
+
+.tab-close:hover:not(:disabled) {
+  background: var(--line);
+  border-color: transparent;
+  color: #ffffff;
+}
+
+.tab-add,
+.tab-scroll {
+  flex: none;
+  align-self: center;
+  padding: 4px 7px;
+}
+
+.tab-add:hover:not(:disabled),
+.tab-scroll:hover:not(:disabled) {
+  border-color: transparent;
+  color: var(--accent);
+}
+
+/*
+ * Double-clicking a tab swaps its label for this, in place. The tab keeps its
+ * shape and roughly its width, so the row does not jump the moment you type.
+ */
+.tab-rename {
+  width: 130px;
+  min-width: 0;
+  padding: 1px 5px;
+  background: var(--sunken);
+  color: #ffffff;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  font: inherit;
+  outline: none;
+}
+
+/* --------------------------------------------------------- base directory bar */
+
+/*
+ * Where the factory runs. On screen rather than in a settings dialog, because it
+ * is the most consequential thing about a factory: it is the agents' working
+ * directory, and a loop can write anywhere below it.
+ */
+.dirbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--dim);
+}
+
+.dirbar-icon {
+  flex: none;
+  color: var(--dim);
+}
+
+.dirbar-label {
+  flex: none;
+}
+
+/*
+ * `@project`, sitting between the label and the path it names.
+ *
+ * Monospace and boxed, so it reads as something you type rather than something the
+ * bar is saying - the same distinction `.dirbar-internal` makes for the folder
+ * suffix, one step more emphatic because this one is a name to reuse rather than a
+ * path fragment to recognise.
+ */
+.dirbar-token {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
+  cursor: default;
+}
+
+.dirbar-path {
+  flex: 1;
+  min-width: 160px;
+  max-width: 760px;
+  padding: 4px 9px;
+  background: var(--sunken);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  outline: none;
+}
+
+.dirbar-path:focus {
+  border-color: var(--accent);
+}
+
+/* The suffix is not editable: every factory keeps its things in the same folder. */
+.dirbar-internal {
+  flex: none;
+  margin-left: -4px;
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--dim);
+  opacity: 0.7;
+}
+
+.dirbar a.button,
+.dirbar button {
+  flex: none;
+  padding: 3px 11px;
+  font-size: 13px;
+}
+
+/*
+ * The two buttons on this line are both icons and nothing else - choose a
+ * directory, and look inside it - so they keep the square box `button.icon-only`
+ * gives them rather than the label-width padding of the rule above. Same size,
+ * same baseline, sitting as a pair.
+ */
+.dirbar button.icon-only {
+  padding: 0;
+}
+
+/*
+ * What git makes of the directory: the branch, or that there is no repository.
+ *
+ * Built like `.dirbar-token` and `.dirbar-internal` - a small boxed monospace label
+ * on the same line - because it is the same kind of thing as those two, a fact about
+ * this directory rather than a control. The difference is that this one is coloured,
+ * and it is the only coloured thing on the bar: the three states are the three
+ * answers to "can any of this be undone", which is worth more than a neutral grey.
+ */
+.dirbar-git {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  min-width: 0;
+  padding: 1px 7px;
+  border: 1px solid color-mix(in srgb, var(--run) 40%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--run) 12%, transparent);
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--run);
+  white-space: nowrap;
+  cursor: default;
+}
+
+/*
+ * The badge also appears in the loop panel's settings row, one per selected
+ * session, saying which branch that session's checkout is on. Same element,
+ * same tints - a worktree badge should read as a worktree badge wherever it is
+ * - but capped harder here: the settings row is narrower than the directory
+ * bar, and a per-loop branch name carries the factory's slug as well.
+ */
+.loop-settings .dirbar-git {
+  max-width: 200px;
+}
+
+/* A long branch name gives way rather than pushing the buttons off the bar. */
+.dirbar-git {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+
+.dirbar-git .icon {
+  flex: none;
+  opacity: 0.85;
+}
+
+/*
+ * A worktree, which is the state this bar's own button leads to. Purple rather than
+ * green: it is not a better version of a checkout, it is a different arrangement, and
+ * the accent is what the rest of the app uses for "this is the deliberate one".
+ */
+.dirbar-git.worktree {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent-soft);
+}
+
+/* The word that tells a worktree's branch from a checkout's, for anyone not reading
+   the colour. Quieter than the branch name beside it, which is the thing being said. */
+.dirbar-git-kind {
+  padding-left: 5px;
+  margin-left: 2px;
+  border-left: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.8;
+}
+
+/*
+ * No repository. The one state on this bar that is a warning rather than a report,
+ * and the amber is the same one the graceful-drain state uses: not an error, because
+ * running a factory in an unversioned directory is allowed and sometimes right, but
+ * the thing on this line you should have read.
+ */
+.dirbar-git.none {
+  border-color: color-mix(in srgb, var(--halt) 45%, transparent);
+  background: color-mix(in srgb, var(--halt) 12%, transparent);
+  color: var(--halt);
+}
+
+/* On no branch: commits would be reachable only by hash, which is nearly as bad as
+   not being version controlled at all, so it reads the same way. */
+.dirbar-git.detached {
+  border-color: color-mix(in srgb, var(--halt) 45%, transparent);
+  background: color-mix(in srgb, var(--halt) 12%, transparent);
+  color: var(--halt);
+}
+
+/* ------------------------------------------------------- factory parameters */
+
+/*
+ * The break between where the loops run and what they run with.
+ *
+ * Two questions on one bar, so the row needs a seam. A rule rather than a gap: the
+ * bar is already spaced with `gap: 8px` and a wider gap would read as sloppy
+ * alignment rather than as a division.
+ */
+.dirbar-sep {
+  flex: none;
+  align-self: stretch;
+  width: 1px;
+  margin: -2px 2px;
+  background: var(--line);
+}
+
+/*
+ * The compact view: which parameters this factory takes, without their values.
+ *
+ * A button, because reading it and opening it are the same intention - you look at
+ * `@topic @depth` to decide whether to go and change one. Borderless so it sits in
+ * the bar as text rather than as a third control competing with the picker and the
+ * git badge; the arrow below is the affordance that says it opens.
+ */
+.dirbar-params-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.dirbar-params-chip:hover {
+  border-color: var(--line-strong);
+  background: var(--surface);
+}
+
+.dirbar-params-chip code {
+  font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+}
+
+/* How many more there are than the three shown. Dim, because it is a count of things
+   you cannot read here - the number is a nudge to open the panel, not information. */
+.dirbar-params-more {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+/*
+ * The panel, folded shut by default.
+ *
+ * `max-height` rather than `display` or unmounting, because the fold is animated and
+ * neither of those can be. The ceiling is generous - six rows and a little - and the
+ * list inside scrolls past it: kiro-flock's original pins this to 200px because it
+ * knows its own contents, and a parameter list does not have a fixed length.
+ *
+ * `overflow: hidden` stays on in both states, which is the one place this departs
+ * from the original. That one switches to `visible` when open so native select popups
+ * can escape the box; there are no selects here, only text inputs, so clipping is
+ * free and the scroll is what the extra rows need.
+ */
+.dirbar-params {
+  max-height: 0;
+  overflow: hidden;
+  background: var(--surface);
+  border-bottom: 0 solid var(--line);
+  transition: max-height 0.25s ease, padding 0.25s ease, border-bottom-width 0.15s;
+}
+
+.dirbar-params.open {
+  max-height: 232px;
+  border-bottom-width: 1px;
+}
+
+.dirbar-params-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 232px;
+  overflow-y: auto;
+  padding: 8px 14px;
+}
+
+/*
+ * While the panel is open the bar above loses its own bottom border, so the two read
+ * as one block with the arrow notched into the seam at the bottom of it rather than
+ * as two stacked bars with a line between them.
+ */
+.dirbar.params-open {
+  border-bottom-color: transparent;
+}
+
+/*
+ * The fold arrow, from kiro-flock's single cluster view.
+ *
+ * Pulled up by its own negative margin and painted in the page background so it
+ * punches a notch in whichever border is above it - the bar's when shut, the panel's
+ * when open. That is what makes it look like part of the bar rather than a button
+ * parked underneath one, and it is why this element comes after the panel in the DOM.
+ *
+ * One glyph, `⌃`, rotated rather than swapped for a second character: pointing down
+ * when there is something to open and up when it is open, so it reads as the
+ * direction the panel will travel. Turning accent when open is the other half of the
+ * same statement.
+ */
+.dirbar-fold {
+  display: block;
+  margin: -9px auto 0;
+  padding: 0 16px;
+  border: none;
+  background: var(--bg);
+  color: var(--dim);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transform: rotate(180deg);
+  transition: color 0.2s, transform 0.2s;
+}
+
+.dirbar-fold:hover {
+  color: var(--text);
+}
+
+.dirbar-fold.open {
+  transform: rotate(0deg);
+  color: var(--accent-soft);
+}
+
+/* One parameter. The name is short and fixed-width, the value takes the room, and
+   the note takes what is left - which is the order of how often each is read. */
+.param-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.param-at {
+  flex: none;
+  color: var(--param);
+  font: 12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 700;
+}
+
+.param-row input {
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--sunken);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.param-row input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/*
+ * The name, in the colour and the face a prompt will show it in, so the row and the
+ * prompt box are visibly talking about the same thing.
+ */
+.param-name {
+  flex: none;
+  width: 150px;
+  color: var(--param);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 700;
+}
+
+/*
+ * A name that would be dropped on save. Reachable only by typing a reserved word or
+ * another parameter's name - sanitising handles every other way in - and reverted on
+ * blur, so this is a warning about the next second rather than a state to live in.
+ */
+.param-name.invalid {
+  border-color: var(--stop);
+  color: var(--stop);
+}
+
+.param-eq {
+  flex: none;
+  color: var(--dim);
+}
+
+.param-value {
+  flex: 1 1 60%;
+}
+
+.param-desc {
+  flex: 1 1 40%;
+  color: var(--dim);
+}
+
+/*
+ * This parameter has taken a name an MCP server also answers to.
+ *
+ * A note, not an error: the parameter wins, which is the rule, and the factory is not
+ * broken. But `@github` will now substitute a value where a reader would assume it
+ * granted the github server, so the row says so at the moment renaming is still
+ * cheap. Amber for the same reason the unversioned-directory badge is: allowed, and
+ * the thing on this row you should have read.
+ */
+.param-shadow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--halt) 45%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--halt) 12%, transparent);
+  color: var(--halt);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.param-shadow svg {
+  flex: none;
+  width: 12px;
+  height: 12px;
+}
+
+/* ------------------------------------------------------------ folder picker */
+
+/*
+ * The popover that browses for a directory.
+ *
+ * Anchored to its button rather than centred as a modal: it is a detail of the
+ * field beside it, not a task of its own, and a dialog in the middle of the screen
+ * would make choosing a folder feel like a bigger decision than it is.
+ */
+.picker {
+  position: relative;
+  flex: none;
+  display: flex;
+}
+
+.picker-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  width: 420px;
+  max-width: calc(100vw - 32px);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgb(0 0 0 / 45%);
+  overflow: hidden;
+}
+
+/* The button sits near the right end of its bar, so growing rightward from its
+   left edge runs off the window. The component measures at open and flips. */
+.picker-pop.align-right {
+  left: auto;
+  right: 0;
+}
+
+.picker-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+/*
+ * Folders | Factories, the top row of the popover.
+ *
+ * Two cells splitting the width, marked by an underline on the live one rather than a
+ * filled pill. The rows below are the content and they are already busy with names,
+ * paths and pills; a solid block at the top would out-shout them. An underline sitting
+ * on the row's own border reads as a tab without adding any weight.
+ *
+ * Only in the picker that asked for it, so the directory bar's popover still starts at
+ * its header.
+ */
+.picker-tabs {
+  display: flex;
+  flex: none;
+  border-bottom: 1px solid var(--line);
+}
+
+.picker-tabs button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  padding: 8px 6px;
+  background: transparent;
+  border: 0;
+  /* The 1px sits on top of the row's border rather than beside it, so nothing moves
+     when the selection changes. */
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  border-radius: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.picker-tabs button svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: inherit;
+}
+
+.picker-tabs button:hover:not(.on) {
+  background: var(--sunken);
+  color: var(--text);
+}
+
+.picker-tabs button.on {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+/*
+ * Type-to-filter, its own quiet row between the header and the list. An input
+ * without a border, because the row's border-bottom already frames it and a boxed
+ * field here would out-shout the list it narrows.
+ */
+.picker-filter {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--dim);
+}
+
+.picker-filter input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 12.5px;
+  padding: 4px 0;
+}
+
+/*
+ * The path scrolls sideways instead of wrapping. A deep path would otherwise set
+ * the height of the header, and the header moving as you walk the tree is the kind
+ * of thing that makes a list hard to aim at.
+ */
+.picker-path {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  font: 11px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--dim);
+  scrollbar-width: none;
+}
+
+.picker-path::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * Ten rows, then scroll. Enough to see a project among its siblings without the
+ * popover growing tall enough to cover the canvas it is sitting over.
+ */
+.picker-list {
+  max-height: 292px;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.picker-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.picker-entry:hover:not(:disabled) {
+  background: var(--sunken);
+  border-color: transparent;
+  color: var(--text);
+}
+
+.picker-entry svg {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--dim);
+}
+
+.picker-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * A folder holding a factory is the thing you came here to find, so it is picked out
+ * rather than pushed back.
+ *
+ * It used to be dimmed, from when the only thing a factory in a folder could do was
+ * spoil the move you were about to make - a warning, so it read like one. Now the same
+ * folder is a factory you can open, which makes it the most interesting row in the
+ * list, and dimming it was hiding the answer.
+ *
+ * Dimming still means something, but only one thing: see `.is-open` below.
+ */
+.picker-entry.has-factory .picker-name {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.picker-entry.has-factory > svg {
+  color: var(--accent-soft);
+}
+
+/*
+ * Already a tab. This is the one state worth greying, because it is the one where
+ * there is nothing here for you: the factory is open somewhere in this window and
+ * going in would only switch to it.
+ */
+.picker-entry.is-open .picker-name {
+  color: var(--dim);
+  font-weight: 400;
+}
+
+.picker-entry.is-open > svg {
+  color: var(--dim);
+}
+
+/*
+ * A row on the Factories tab: a name with its directory under it.
+ *
+ * Two lines where a folder row is one, because the two facts are not equally useful.
+ * The name is what the operator remembers and the path is how they tell two factories
+ * of the same name apart, so putting the path beside the name would either truncate
+ * the name or leave the path as an ellipsis, and the pair is the row's whole content.
+ *
+ * `align-items: flex-start` with a nudged icon rather than centring: a two-line row
+ * with a centred glyph reads as a glyph floating between the lines, where against the
+ * first line it reads as belonging to the name.
+ */
+.picker-known {
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 7px;
+}
+
+.picker-known > svg {
+  margin-top: 2px;
+  color: var(--accent-soft);
+}
+
+.picker-known .picker-name {
+  display: block;
+  font-weight: 500;
+}
+
+.picker-known-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+/*
+ * The directory, quieter than the name and truncated from the left.
+ *
+ * `direction: rtl` with the text isolated is the one way to get a leading ellipsis in
+ * CSS, and a path wants one: `/Users/x/code/projects/api` and `…/projects/web` differ
+ * at the end, so cutting the end off is cutting off the part that identifies it. The
+ * `bdi` behaviour comes from `unicode-bidi: plaintext`, which keeps the path itself
+ * reading left to right inside the reversed box.
+ */
+.picker-known-dir {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  unicode-bidi: plaintext;
+  font: 10.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--dim);
+}
+
+.picker-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  /* A factory can be called anything, and a long name must not squeeze the folder
+     name it is sitting beside down to an ellipsis. Under half the row, then it
+     truncates itself. */
+  max-width: 45%;
+  overflow: hidden;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--dim);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  /*
+   * Not uppercased, though it was. It used to read "factory" - a label, which
+   * uppercase suits - and it now carries a name somebody chose, where shouting it
+   * back at them loses the capitalisation they typed.
+   */
+  text-transform: none;
+}
+
+/* The pill is the factory, so it takes the accent with the row. */
+.picker-entry.has-factory .picker-tag,
+.picker-head .picker-tag:not(.is-open) {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent-soft);
+}
+
+.picker-entry.is-open .picker-tag,
+.picker-head .picker-tag.is-open {
+  border-color: var(--line);
+  background: transparent;
+  color: var(--dim);
+}
+
+/* Sized against the pill's own text rather than the row's folder icon, which the
+   general `.picker-entry svg` rule would otherwise hand it. */
+.picker-tag svg {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  color: inherit;
+}
+
+.picker-empty {
+  margin: 0;
+  padding: 10px 8px;
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.picker-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+  border-top: 1px solid var(--line);
+}
+
+/*
+ * What the last scan of the home directory found, above the button that ran it.
+ *
+ * Brighter than `.picker-empty` and separated by its own rule, because it is not the
+ * list explaining why it is short - it is the answer to something the operator asked
+ * for and waited several seconds on. Errors land in this same line; it says what
+ * happened either way, so it does not need two appearances.
+ */
+.picker-note {
+  margin: 0;
+  padding: 8px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--fg);
+}
+
+/*
+ * The glyph turns while the walk is running.
+ *
+ * The only thing saying so, unlike the loop icon whose card has a border and a count
+ * as well: the popover is otherwise identical mid-scan, and the label changing to
+ * "Looking…" is easy to miss on a control you just clicked. Stilled for anyone who
+ * asked their system to stop animating things, who still has the label.
+ */
+.picker-foot .picker-scanning {
+  animation: spin 1.2s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .picker-foot .picker-scanning {
+    animation: none;
+  }
+}
+
+/*
+ * The actions share the row and Cancel keeps its own width.
+ *
+ * `:first-child` was enough when there was one action. There can be two now - move
+ * here, or open the factory that is already here - and they are equally weighted, so
+ * they divide the space between them. Cancel is always last and is always the same
+ * three syllables, so it is the one that does not stretch.
+ */
+.picker-foot button:not(:last-child) {
+  flex: 1;
+  min-width: 0;
+}
+
+/* A factory's name rides in the open button, and a factory can be called anything. */
+.picker-foot .picker-open-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ----------------------------------------------------------- library picker */
+
+/*
+ * Taking something out of the library: three columns and a filter.
+ *
+ * Built on the folder picker's bones - same anchoring, same shadow, same filter row,
+ * same flip when it would run off the window - because they are the same kind of
+ * control and the one that already existed got those decisions right. What differs is
+ * the contents: a folder picker shows one list you walk down, and this shows three you
+ * choose across.
+ */
+.libpick {
+  position: relative;
+  flex: none;
+  display: flex;
+}
+
+/*
+ * Wider than the folder picker, and it has to be: three columns of names with a line
+ * of description under each. `LIB_WIDTH` in FactoryView.tsx must agree with this - it
+ * is what the flip is measured against, and measuring the element instead would mean
+ * rendering it in the wrong place first.
+ */
+.libpick-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  width: 660px;
+  max-width: calc(100vw - 32px);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgb(0 0 0 / 45%);
+  overflow: hidden;
+}
+
+.libpick-pop.align-right {
+  left: auto;
+  right: 0;
+}
+
+/* How much the filter is hiding, on the right of the row it belongs to. Dim and
+   small: it is a reassurance that the filter is working, not a number to read. */
+.libpick-count {
+  flex: none;
+  color: var(--dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * The three columns, with rules between them rather than gaps.
+ *
+ * A gap wide enough to separate three lists reads as three floating lists; a hairline
+ * says they are one thing divided, which is what the library is. Equal widths because
+ * no category deserves more room than the others - a library heavy on loops today is
+ * heavy on factories next month, and a layout that sized itself to today's contents
+ * would move every time somebody contributed.
+ */
+.libpick-cols {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.libpick-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-left: 1px solid var(--line);
+}
+
+.libpick-col:first-child {
+  border-left: 0;
+}
+
+.libpick-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px 5px;
+  border-bottom: 1px solid var(--line);
+  color: var(--dim);
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* How many are in this column. Beside the heading rather than in it, so the heading
+   stays a word: the count changes as you filter and the label does not. */
+.libpick-n {
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--sunken);
+  color: var(--dim);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Eight rows or so, then scroll. Each column scrolls on its own, which is the point of
+ * columns: a long list of loops does not push the factories out of view.
+ */
+.libpick-list {
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.libpick-entry {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.libpick-entry:hover:not(:disabled) {
+  background: var(--sunken);
+  border-color: transparent;
+  color: var(--text);
+}
+
+.libpick-name {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  font-size: 13px;
+}
+
+/*
+ * What the entry arrives as: a cluster's nodes, a factory's loops.
+ *
+ * Pushed to the right end of the name row, because it is a number you compare down the
+ * column rather than read in the sentence. Absent on a plain loop - one session is the
+ * unmarked case, and a badge on every row would be a column of badges saying nothing.
+ */
+.libpick-size {
+  flex: none;
+  margin-left: auto;
+  padding-left: 8px;
+  color: var(--dim);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/*
+ * The line an entry is chosen on, and the thing the old native select could not show
+ * at any width. One line, clipped: the column is a list you scan, and the whole of it
+ * is on the tooltip.
+ */
+.libpick-desc {
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dim);
+  font-size: 11.5px;
+}
+
+/*
+ * An empty column, which keeps its heading and says why it is empty.
+ *
+ * Rendered rather than collapsed on purpose. A column that vanished when its category
+ * was empty would reflow the other two as the filter narrowed - three, then one, then
+ * two - and a popover whose geometry moves while you type is one you cannot aim at.
+ */
+.libpick-empty {
+  margin: 0;
+  padding: 10px;
+  color: var(--dim);
+  font-size: 11.5px;
+}
+
+/* ------------------------------------------------------------- empty window */
+
+.no-factory {
+  display: grid;
+  place-items: center;
+  flex: 1;
+  padding: 40px;
+  color: var(--dim);
+  text-align: center;
+}
+
+.no-factory button {
+  margin: 0 4px;
+}
+
+/* The error text is a dismiss button as well as a message. */
+.error {
+  cursor: pointer;
+}
+
+/* ---------------------------------------------------------------- loop files */
+
+/*
+ * The file panel under the canvas, and its divider.
+ *
+ * The same construction as the settings panel on the right, turned a quarter turn:
+ * a 7px grab strip with a 1px line drawn inside it, the fold control sitting on the
+ * line, and the panel folded by animating its size to zero while staying mounted.
+ * Same curve and duration, because it is the same gesture and should feel like it.
+ */
+
+.resizer-h {
+  flex: 0 0 7px;
+  cursor: row-resize;
+  background: transparent;
+  position: relative;
+}
+
+/* Shut, the divider is only a rail for the arrow: there is nothing left to drag. */
+.resizer-h.collapsed {
+  cursor: default;
+}
+
+.resizer-h::after {
+  content: '';
+  position: absolute;
+  inset: 3px 0;
+  background: var(--line);
+}
+
+.resizer-h:hover::after,
+.resizer-h:active::after {
+  background: var(--accent);
+}
+
+/* Dragging beats animating: see `resizingFiles` in FactoryView. */
+.stack:has(.resizer-h.dragging) .files {
+  transition: none;
+}
+
+/*
+ * The arrow that folds the file panel.
+ *
+ * Wide and short rather than tall and narrow - it straddles a horizontal line, so
+ * it is the settings-panel arrow with its axes swapped. It points the way the panel
+ * will move: down to push it away, up to pull it back, which is one glyph rotated a
+ * quarter turn one way or the other rather than two icons that could drift apart.
+ */
+.files-arrow {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.15s, color 0.15s;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--dim);
+  cursor: pointer;
+}
+
+/*
+ * Shut, the divider is against the bottom of the window and an arrow centred on it
+ * would have half of itself off screen, so it tucks fully above the line. Moving
+ * the transform rather than swapping `top` for `bottom` is what lets it slide as
+ * the panel closes instead of jumping when the class changes.
+ */
+.resizer-h.collapsed .files-arrow {
+  transform: translate(-50%, -100%);
+}
+
+.files-arrow:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.files-arrow .icon {
+  transform: rotate(90deg);
+  transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.files-arrow.closed .icon {
+  transform: rotate(270deg);
+}
+
+.files {
+  flex: 0 0 auto;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  transition: height 0.28s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease;
+}
+
+/*
+ * Folded shut. `!important` beats the inline height, which is the operator's chosen
+ * size and survives the fold - reopening returns to it rather than to a default.
+ *
+ * `visibility: hidden` is what takes the panel's controls out of the tab order
+ * while it is shut; opacity alone would leave them focusable behind nothing.
+ */
+.files.collapsed {
+  height: 0 !important;
+  min-height: 0;
+  border-top-width: 0;
+  opacity: 0;
+  visibility: hidden;
+}
+
+.files-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/*
+ * A file dragged over the panel: the accent ring where it will be taken - into
+ * the project root or the loop's folder - and the stop tint where it will not,
+ * which is the changes view. The same ring the canvas shows for a factory file,
+ * so "this will land here" looks the same everywhere it is true.
+ */
+.files-panel.dropping {
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+
+.files-panel.drop-refused {
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--stop) 55%, transparent);
+}
+
+/* ---- the panel's own bar */
+
+/*
+ * One row that is either the tree's controls or the open file's.
+ *
+ * The same row for both, because they are the same place: the back button appears
+ * where the folder name was, so returning to the tree is where you left it rather
+ * than somewhere else in the panel.
+ */
+.files-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.files-bar button {
+  font-size: 12px;
+  padding: 3px 7px;
+}
+
+.files-title {
+  color: var(--text);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/*
+ * The folder, or the open file's path. Truncated from the *left*, because the end
+ * of a path is the part that identifies it - `…/loops/a/notes.md` is useful and
+ * `.kirofactory/loops/a…` is not.
+ */
+.files-path {
+  color: var(--dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.files-sort {
+  background: var(--sunken);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 2px 5px;
+  font: inherit;
+  font-size: 11px;
+}
+
+/* The listing hit the server's cap. A caption, not a control: dim and quiet,
+   sitting left of the sort dropdown, saying only that the tree on screen is the
+   first slice of a bigger one. */
+.files-cap {
+  color: var(--dim);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.files-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 0;
+}
+
+.files-body .empty {
+  color: var(--dim);
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+/* ---- the tree */
+
+.files-tree,
+.files-tree ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/*
+ * A row. Indented by an inline `padding-left` set from its depth, so nesting is one
+ * number per row rather than a stack of nested lists to keep in step.
+ */
+.files-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.files-row:hover {
+  background: var(--sunken);
+}
+
+.files-row .icon {
+  color: var(--dim);
+  width: 0.95em;
+  height: 0.95em;
+}
+
+.files-row-file {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--dim);
+}
+
+/* The file being read, so the tree says where you are when you come back to it. */
+.files-row-file.active {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--text);
+}
+
+/* The `+`/`−` on a folder, and the space that keeps a file's name in line with it. */
+.files-twist {
+  flex: none;
+  width: 10px;
+  font-size: 11px;
+  color: var(--dim);
+  text-align: center;
+}
+
+.files-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/*
+ * Size and time. The one thing a collapsed folder says about itself: a row whose
+ * total is growing is a folder being written to, without opening it.
+ */
+.files-meta {
+  flex: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  color: var(--dim);
+  opacity: 0.75;
+}
+
+/*
+ * Delete, on the row.
+ *
+ * Dimmed rather than hidden until hover. A button revealed only on hover cannot be
+ * found by the keyboard and cannot be found at all on a touch screen, and this one
+ * deletes a file - being faint is enough to keep it out of the way of reading the
+ * list, and it comes up to full strength with the row and on focus.
+ */
+.files-del {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--dim);
+  cursor: pointer;
+  opacity: 0.4;
+  transition: opacity 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.files-row:hover .files-del {
+  opacity: 1;
+}
+
+.files-del:hover,
+.files-del:focus-visible {
+  opacity: 1;
+  color: var(--stop);
+  border-color: var(--stop);
+}
+
+/* ---- one file */
+
+.files-text,
+.files-code {
+  margin: 0 10px;
+  padding: 9px 11px;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+/*
+ * highlight.js paints its own background, which is a different dark from this one
+ * and shows as a rectangle inside the box. Cleared so the panel's own surface is
+ * what you see; the theme's colours are all on the spans inside.
+ */
+.files-code code.hljs {
+  background: transparent;
+  padding: 0;
+  font: inherit;
+}
+
+/*
+ * The rendered page: the whole body, and none of this app's styling.
+ *
+ * White, because a page written for a browser assumes one. The panel is dark and an
+ * HTML file that sets colours but no background would render dark text on dark and
+ * read as an empty preview. The iframe is a document of its own, so nothing here
+ * inherits in either direction - which is the point, and is also why the white has
+ * to be stated rather than left to the theme.
+ *
+ * Filling the body rather than sitting in a bordered box like the source branches:
+ * those are a quotation of a file inside the panel, this is the artefact itself, and
+ * a report given a margin and a rounded frame looks like a widget rather than a page.
+ */
+.files-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+
+/*
+ * The body's own padding, which every other branch wants, would leave an 8px dark
+ * strip above and below the white page and read as a seam rather than as breathing
+ * room. Dropped only while a frame is what is inside.
+ */
+.files-body:has(.files-frame) {
+  padding: 0;
+}
+
+/* ---- the three-way switch */
+
+/*
+ * Which source the panel is showing: the loop's folder, the project, its changes.
+ *
+ * A segmented control rather than three loose buttons, and rather than a `<select>`
+ * like the sort beside it. Three options that are each one word and are switched
+ * between constantly want to be one press away and want to show which one is current
+ * without being opened - that is what a segmented control is for, and it is why this
+ * could replace the title rather than being added next to it.
+ *
+ * Built from the pattern already in the stylesheet: a hairline box, `active` for the
+ * current one, the accent edge marking it - the same three moves `.tab.active` makes
+ * one row up in the window.
+ */
+.files-switch {
+  display: flex;
+  flex: none;
+  align-items: stretch;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.files-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 170px;
+  padding: 2px 8px;
+  border: none;
+  /* Hairlines between the segments and nowhere else, so the group reads as one
+     control with divisions rather than three buttons that happen to be touching. */
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.files-seg:first-child {
+  border-left: none;
+}
+
+.files-seg:hover:not(:disabled):not(.active) {
+  background: var(--sunken);
+  color: var(--text);
+}
+
+.files-seg.active {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: #ffffff;
+  /* The accent edge along the top, exactly as the front tab carries it. */
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.files-seg.active .icon {
+  color: var(--accent);
+}
+
+/*
+ * Unavailable, and saying so by looking it rather than by disappearing. The changes
+ * segment is disabled in a directory that is not a repository, and the loop segment
+ * until a loop is selected; both keep their place so the switch does not change width
+ * under the pointer, and both carry the reason in a tooltip.
+ */
+.files-seg:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* The loop segment is labelled with the loop's name, which can be anything. */
+.files-seg-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- what changed */
+
+/*
+ * A status letter on a row, and the colours the whole changes view is read by.
+ *
+ * Green for content that is new, red for content that is gone, amber for content that
+ * changed in place. Untracked shares the green with added because that is what it is -
+ * a new file - and the `?` is what tells them apart for anyone who cannot use the
+ * colour, which is the same reason the diff rows carry a sign as well as a tint.
+ */
+.files-status {
+  flex: none;
+  width: 1.1em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.st-add,
+.st-new {
+  color: var(--run);
+}
+
+/* Untracked is new but not yet git's business, so it says the same thing more quietly. */
+.st-new {
+  opacity: 0.7;
+}
+
+.st-del {
+  color: var(--stop);
+}
+
+.st-mod {
+  color: var(--halt);
+}
+
+/* A conflict is the one status that is a problem rather than a description. */
+.st-clash {
+  color: var(--stop);
+  text-decoration: underline;
+}
+
+/* `+12 −3` beside the path, when a diff is open. */
+.files-tally {
+  display: inline-flex;
+  gap: 6px;
+  flex: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Which comparison produced the list, above it. */
+.files-note {
+  margin: 0 0 6px;
+  padding: 0 12px;
+  color: var(--dim);
+  font-size: 11.5px;
+}
+
+/* ---- one file's change */
+
+/*
+ * The diff: one column of rows, two line-number gutters, a sign, and the line.
+ *
+ * Inline rather than side by side, which is the same decision the panel makes about
+ * the tree and the viewer and for the same reason - this is the short edge of the
+ * window, and two columns halve a width that is already the constraint. Two gutters
+ * instead of two columns of text: a row says where it sits in both files, and a
+ * removed line still has a number.
+ *
+ * `pre` rather than the `pre-wrap` the file viewer uses, and this is the one place
+ * that differs. A wrapped line in a diff breaks the alignment between the gutter and
+ * the line it belongs to, so a long line scrolls sideways instead.
+ */
+.diff {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+}
+
+.diff-row {
+  display: flex;
+  align-items: baseline;
+  /* No wrapping and no shrinking: the row is as wide as its content and the
+     container scrolls, which is what keeps every gutter in one vertical line. */
+  min-width: max-content;
+  white-space: pre;
+}
+
+/*
+ * The line numbers. Not selectable, because the first thing anyone does with a diff
+ * is copy a few lines out of it, and a gutter that comes along turns the paste into
+ * something that has to be cleaned up by hand.
+ */
+.diff-gutter {
+  flex: none;
+  width: 3.4em;
+  padding: 0 6px;
+  color: var(--dim);
+  opacity: 0.55;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  user-select: none;
+}
+
+/* The second gutter carries the line that separates numbers from content. */
+.diff-gutter + .diff-gutter {
+  border-right: 1px solid var(--line);
+}
+
+.diff-sign {
+  flex: none;
+  width: 1.4em;
+  text-align: center;
+  user-select: none;
+  opacity: 0.9;
+}
+
+.diff-text {
+  flex: 1;
+  padding-right: 12px;
+  color: var(--text);
+}
+
+/*
+ * Added and removed. A tint across the whole row rather than colour on the text,
+ * because what changed is the line, and colouring the glyphs makes the diff hard to
+ * read at exactly the moment it matters - a line that is both added and full of
+ * syntax is two colour systems fighting.
+ */
+.diff-add {
+  background: color-mix(in srgb, var(--run) 13%, transparent);
+}
+
+.diff-add .diff-sign {
+  color: var(--run);
+}
+
+.diff-del {
+  background: color-mix(in srgb, var(--stop) 13%, transparent);
+}
+
+.diff-del .diff-sign {
+  color: var(--stop);
+}
+
+/* Context. Dimmed, so the changes are what the eye lands on. */
+.diff-same .diff-text {
+  color: var(--dim);
+}
+
+/*
+ * A run of unchanged lines that was left out.
+ *
+ * Marked as clearly not being a line of the file: no numbers, a band across the row,
+ * and its own text rather than any of the file's. Without something this distinct, a
+ * collapsed diff reads as a complete file with lines missing.
+ */
+.diff-skip {
+  background: var(--sunken);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  color: var(--dim);
+  font-size: 11px;
+  font-style: italic;
+  user-select: none;
+}
+
+.diff-skip .diff-text {
+  color: var(--dim);
+  opacity: 0.8;
+}
+
+.files-md {
+  padding: 2px 12px 10px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.files-md h1,
+.files-md h2,
+.files-md h3,
+.files-md h4 {
+  color: #ffffff;
+  margin: 12px 0 6px;
+  line-height: 1.3;
+}
+
+.files-md h1 {
+  font-size: 17px;
+}
+
+.files-md h2 {
+  font-size: 15px;
+}
+
+.files-md h3,
+.files-md h4 {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.files-md p,
+.files-md li {
+  margin: 6px 0;
+  line-height: 1.6;
+}
+
+.files-md ul,
+.files-md ol {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+
+.files-md a {
+  color: var(--accent-soft);
+}
+
+.files-md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  background: var(--sunken);
+  border-radius: 3px;
+  padding: 1px 4px;
+  color: var(--accent-soft);
+}
+
+/* A fenced block: one box, so the inline-code treatment is cleared inside it. */
+.files-md pre {
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 9px 11px;
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.files-md pre code {
+  background: none;
+  padding: 0;
+  color: var(--text);
+}
+
+.files-md blockquote {
+  margin: 8px 0;
+  padding-left: 10px;
+  border-left: 3px solid var(--line-strong);
+  color: var(--dim);
+}
+
+.files-md hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 12px 0;
+}
+
+.files-md strong {
+  color: #ffffff;
+}
+
+.files-md table,
+.files-front {
+  border-collapse: collapse;
+  margin: 10px 0;
+  font-size: 12px;
+}
+
+.files-md th,
+.files-md td {
+  border: 1px solid var(--line);
+  padding: 5px 9px;
+  text-align: left;
+}
+
+.files-md th {
+  background: var(--sunken);
+  color: #ffffff;
+}
+
+/*
+ * A markdown file's frontmatter, shown as a quiet key-and-value block above the
+ * body rather than left to the renderer, which reads a leading `---` as a heading
+ * and a rule and makes a mess of the top of the file.
+ */
+.files-front {
+  color: var(--dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.files-front td {
+  padding: 1px 10px 1px 0;
+}

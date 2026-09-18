@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="1.25 2.75 21.5 21.5" role="img" aria-label="Factory for Kiro">
+  <!--
+    The factory, in the product purple, on nothing.
+
+    Just the one shape. A ghost beside it and a dark plate behind it were both
+    tried and both lost: at 16px the ghost is a smudge, and a background square
+    makes the icon a tile in a strip of favicons that mostly are not. Transparent,
+    it takes the tab's own colour scheme, which is the browser's job and not ours.
+
+    Filled rather than stroked, unlike the header. A 1.5-on-24 stroke lands on one
+    pixel here and the sawtooth roof turns to mush; the silhouette is the part that
+    reads, and filled it is still a building rather than a bar chart.
+
+    The path is `PATHS.factory` from Icon.tsx, unmodified - the viewBox is the
+    glyph's own bounding box padded out to a square, so there is no transform to
+    keep in step either. Change the mark there and this goes stale, which is the
+    trade for not building an asset pipeline to share one glyph between two files.
+  -->
+  <path d="M2.25 20.25V6.75H6v7.5l5.25-3.75V14.25L16.5 10.5v3.75l5.25-3.75v9.75Z" fill="#9046ff" />
+</svg>

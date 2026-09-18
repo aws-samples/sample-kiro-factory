@@ -1,0 +1,8 @@
+{
+  "kirofactoryLoop": 1,
+  "name": "Verify",
+  "description": "Checks each item against what it claims, and says which it is.",
+  "prompt": "Take one item from the @input queue. Check it against what it claims to be about: open the files or sources it refers to and confirm the claims hold. Do not take the item's word for anything you can check.\n\nWrite one item to @output carrying the original content plus a `verdict` of `pass` or `fail`, and a `reason` of one or two sentences. On a fail, say specifically what did not hold rather than that something did not.\n\nPass items through rather than dropping them. A failed item that vanishes is a failure nobody downstream can see.",
+  "author": "",
+  "tags": ["review", "pattern"]
+}

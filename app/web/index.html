@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      Defence in depth, aimed squarely at script execution.
+
+      The app is served from one origin and talks to that origin only, so `'self'`
+      everywhere is not a compromise, it is a description. What it buys is that the
+      one thing this page renders from outside itself - a loop's HTML output, drawn
+      in an iframe - stays unable to run code even if the sandbox that currently
+      stops it is ever loosened. A document with a local scheme inherits its parent's
+      policy, so `script-src 'self'` reaches into that iframe too, and an `srcdoc`
+      full of `<script>` is inert twice over rather than once.
+
+      `style-src` admits inline, and that is not an oversight: a handful of React
+      `style` props position the factory floor, and a rendered report is worth
+      looking at with its own styling intact. Inline CSS cannot execute anything -
+      the directive that matters here is the one above it, which does not budge.
+
+      `object-src 'none'` and `base-uri 'none'` close the two classic ways around a
+      script policy: a plugin document, and a rewritten `<base>` that quietly
+      re-points every relative script URL somewhere else.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self';
+               script-src 'self';
+               style-src 'self' 'unsafe-inline';
+               img-src 'self' data: blob:;
+               font-src 'self';
+               connect-src 'self';
+               frame-src 'self';
+               object-src 'none';
+               base-uri 'none';
+               form-action 'none'"
+    />
+    <!--
+      This run's token, written in by the server as it serves this file. The value
+      below is a placeholder and is never what a browser receives; a page showing it
+      unsubstituted came from something other than this app's server, and every write
+      it attempts will be refused.
+
+      In the document rather than fetched, so the app holds it before its first
+      request rather than having a moment at startup where it does not.
+    -->
+    <meta name="kirofactory-token" content="__KIROFACTORY_TOKEN__" />
+    <title>Factory for Kiro</title>
+    <!--
+      The wordmark, shrunk to a tab. SVG rather than a .ico: it is one file, it is
+      the same path data the header draws, and there is no size to pick. Served from
+      `web/public`, which vite copies to the root of the build.
+    -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>

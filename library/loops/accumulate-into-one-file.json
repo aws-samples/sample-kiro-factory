@@ -1,0 +1,8 @@
+{
+  "kirofactoryLoop": 1,
+  "name": "Collect",
+  "description": "Drains the queue into one growing file on disk.",
+  "prompt": "Take one item from the @input queue and append it to a single markdown file in your own loop folder, one section per item, newest at the bottom. Create the file if it is not there.\n\nAppend, never rewrite. Each round adds to what previous rounds left, and rewriting the file loses the work of every round before this one.\n\nIf @input is empty, leave the file alone and stop for this round.",
+  "author": "",
+  "tags": ["output", "pattern"]
+}

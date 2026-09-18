@@ -1,0 +1,25 @@
+# Local clones of reference projects (kiro-flock, aidlc-workflows, tiny-loop-sample)
+references/
+
+# Scratch space for command output and commit messages
+.scratch/
+
+# Build output
+node_modules/
+dist/
+*.tsbuildinfo
+
+# What the loops write when they run: queues, scratch, whatever they produce.
+app/workspace/
+
+# A factory's own folder, wherever it lands. Unanchored on purpose: a factory can be
+# pointed at any directory, including this repository, and what appears there is a
+# running factory's state - its document, its queues, its loops' output - not source.
+.kirofactory/
+
+# Factories that were not given a directory of their own get one here.
+app/workspaces/
+
+# Which factories are open on this machine, and where each one lives. Local state:
+# the factories themselves live in their own directories, under .kirofactory/.
+app/factories.json

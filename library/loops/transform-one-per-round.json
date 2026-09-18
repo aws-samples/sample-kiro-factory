@@ -1,0 +1,8 @@
+{
+  "kirofactoryLoop": 1,
+  "name": "Transform",
+  "description": "Takes one item a round, does one thing to it, hands it on.",
+  "prompt": "Take exactly one item from the @input queue this round. Do the work described below on it, then write the result to the @output queue as a single item, keeping any fields you were given that you did not change.\n\nOne item per round, even when more are waiting. If @input is empty, say so and stop for this round rather than inventing work.\n\nThe work: describe it here.",
+  "author": "",
+  "tags": ["pattern", "starter"]
+}

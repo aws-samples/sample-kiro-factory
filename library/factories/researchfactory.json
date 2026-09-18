@@ -1,0 +1,52 @@
+{
+  "kirofactoryLibrary": 1,
+  "name": "ResearchFactory",
+  "description": "Six Kiro Flock nodes research one topic from different angles and argue it out in a single shared document until nobody has anything new to add.",
+  "author": "",
+  "tags": [],
+  "parameters": [
+    {
+      "name": "topic",
+      "value": "the fastest animal on the planet",
+      "description": "What to research."
+    },
+    {
+      "name": "context",
+      "value": "wikipedia and the scientific corners of the internet",
+      "description": "Where the nodes should look first. Their general knowledge is used as well."
+    }
+  ],
+  "loops": [
+    {
+      "id": "loop-mtmm7y82",
+      "name": "Researcher",
+      "prompt": "Look at @context and research @topic from your own distinct angle. Read your neighbours' findings and argue with them: challenge weak claims, offer counter-evidence, and defend your position rather than converging early. Write your consolidated research finding into the one shared file @project/research.md. All nodes edit that same file: re-read it each turn and correct or extend what your neighbours wrote rather than overwriting it. The argument must end: once your position has survived a neighbour's challenge unchanged, or you have nothing new to add, treat the research as concluded and declare no further work rather than re-litigating settled points.",
+      "autoPause": false,
+      "autoStop": true,
+      "disabled": false,
+      "mcp": [],
+      "tools": [
+        "read",
+        "write",
+        "glob",
+        "grep",
+        "code",
+        "shell",
+        "web",
+        "web_search",
+        "web_fetch",
+        "knowledge",
+        "todo_list",
+        "introspect"
+      ],
+      "cluster": {
+        "mode": "fixed",
+        "size": 6,
+        "comms": "flock"
+      },
+      "x": 365,
+      "y": 177
+    }
+  ],
+  "wires": []
+}

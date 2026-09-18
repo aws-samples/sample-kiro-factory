@@ -1,0 +1,16 @@
+{
+  "kirofactoryLoop": 1,
+  "name": "WikiArticleOfTheDay",
+  "description": "Watches Wikipedia's featured articles and hands on the link to each new one.",
+  "prompt": "Read the list of articles of the day https://en.wikipedia.org/wiki/Wikipedia:Today%27s_featured_article and take the newest one we have not added and add the link to it into @output ",
+  "author": "Ivo Kammerath",
+  "tags": [
+    "source",
+    "wikipedia"
+  ],
+  "cluster": {
+    "mode": "fixed",
+    "size": 3,
+    "comms": "isolated"
+  }
+}

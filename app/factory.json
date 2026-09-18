@@ -1,0 +1,82 @@
+{
+  "loops": [
+    {
+      "id": "a",
+      "name": "Write",
+      "prompt": "Write a short fairytale into the @output queue every round",
+      "mcp": [],
+      "tools": [
+        "read",
+        "write",
+        "glob",
+        "grep",
+        "code",
+        "shell",
+        "web",
+        "web_search",
+        "web_fetch",
+        "knowledge",
+        "todo_list",
+        "introspect"
+      ],
+      "x": 48,
+      "y": 103
+    },
+    {
+      "id": "b",
+      "name": "Reader",
+      "prompt": "read whats in the @input queue one per round, add a sentence to it and hand it to your @output",
+      "mcp": [],
+      "tools": [
+        "read",
+        "write",
+        "glob",
+        "grep",
+        "code",
+        "shell",
+        "web",
+        "web_search",
+        "web_fetch",
+        "knowledge",
+        "todo_list",
+        "introspect"
+      ],
+      "x": 336,
+      "y": 233
+    },
+    {
+      "id": "loop-mt3jyi57",
+      "name": "Verifier",
+      "prompt": "check @input for grammar",
+      "mcp": [],
+      "tools": [
+        "read",
+        "write",
+        "glob",
+        "grep",
+        "code",
+        "shell",
+        "web",
+        "web_search",
+        "web_fetch",
+        "knowledge",
+        "todo_list",
+        "introspect"
+      ],
+      "x": 604,
+      "y": 381
+    }
+  ],
+  "wires": [
+    {
+      "id": "a-b-mt3jdg3d",
+      "from": "a",
+      "to": "b"
+    },
+    {
+      "id": "b-loop-mt3jyi57-mt3jyubz",
+      "from": "b",
+      "to": "loop-mt3jyi57"
+    }
+  ]
+}

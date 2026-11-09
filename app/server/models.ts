@@ -120,20 +120,74 @@ export function discoverModels(command: string): Promise<ModelCatalog> {
 }
 
 /**
- * The `models` block of a `session/new` response, defensively.
+ * The model catalogue from a `session/new` response, defensively.
  *
- * No block, or one that is not shaped like a catalogue, is a failure rather than an
- * empty catalogue: the session opened but did not say what it can run, so the answer
- * is unknown. An `availableModels` that is present and empty is not a failure - that
- * is a real answer, and it means this subscription offers nothing to choose between.
+ * kiro-cli has shipped this in two shapes. Newer builds carry it in `configOptions`:
+ * an array of `select` controls, one of which has `id: "model"`, whose `options` are
+ * `{ value, name, description }` and whose `currentValue` is the default. Older builds
+ * put it in a top-level `models` block as `{ availableModels: [{ modelId, name,
+ * description }], currentModelId }`. Both are read here, `configOptions` first, so the
+ * probe works regardless of which build is installed.
+ *
+ * A response carrying neither shape is a failure rather than an empty catalogue: the
+ * session opened but did not say what it can run, so the answer is unknown. A model
+ * control that is present and lists nothing is a real answer, not a failure - the
+ * subscription offers nothing to choose between.
  */
 function parseCatalog(result: unknown): ModelCatalog {
+  const fromConfig = parseConfigOptions(result);
+  if (fromConfig !== undefined) return fromConfig;
+
+  const fromModels = parseModelsBlock(result);
+  if (fromModels !== undefined) return fromModels;
+
+  return { models: [], failed: true, reason: 'session/new returned no model catalogue' };
+}
+
+/**
+ * The newer shape: a `model` entry inside `configOptions`.
+ *
+ * Returns `undefined` when there is no such entry, so the caller can fall back to the
+ * older shape rather than report a failure. A present-but-empty `options` is a real,
+ * non-failing answer.
+ */
+function parseConfigOptions(result: unknown): ModelCatalog | undefined {
+  const configOptions = (result as { configOptions?: unknown } | null)?.configOptions;
+  if (!Array.isArray(configOptions)) return undefined;
+
+  const control = configOptions.find(
+    (o): o is { id?: unknown; currentValue?: unknown; options?: unknown } =>
+      typeof o === 'object' && o !== null && (o as { id?: unknown }).id === 'model',
+  );
+  if (!control || !Array.isArray(control.options)) return undefined;
+
+  const list: ModelInfo[] = [];
+  for (const o of control.options) {
+    const raw = o as { value?: unknown; name?: unknown; description?: unknown };
+    if (typeof raw.value !== 'string' || raw.value.length === 0) continue;
+    list.push({
+      id: raw.value,
+      name: typeof raw.name === 'string' && raw.name.length > 0 ? raw.name : raw.value,
+      ...(typeof raw.description === 'string' ? { description: raw.description } : {}),
+    });
+  }
+  return {
+    models: list,
+    ...(typeof control.currentValue === 'string' ? { defaultId: control.currentValue } : {}),
+  };
+}
+
+/**
+ * The older shape: a top-level `models` block with `availableModels`.
+ *
+ * Returns `undefined` when the block is absent or not shaped like a catalogue, so the
+ * caller reports a failure only once neither shape matched.
+ */
+function parseModelsBlock(result: unknown): ModelCatalog | undefined {
   const models = (result as { models?: unknown } | null)?.models as
     | { currentModelId?: unknown; availableModels?: unknown }
     | undefined;
-  if (!models || !Array.isArray(models.availableModels)) {
-    return { models: [], failed: true, reason: 'session/new returned no model catalogue' };
-  }
+  if (!models || !Array.isArray(models.availableModels)) return undefined;
 
   const list: ModelInfo[] = [];
   for (const m of models.availableModels) {

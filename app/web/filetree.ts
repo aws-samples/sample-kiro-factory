@@ -39,7 +39,13 @@ export interface FolderNode {
    */
   path: string;
   children: Node[];
-  /** Every descendant file's size, summed. */
+  /**
+   * How many entries the folder holds, when the listing is loaded one folder at a
+   * time (the project). Its children are then only what has been fetched, so
+   * `size` and `time` stay 0 rather than summing a part and calling it the whole.
+   */
+  count?: number;
+  /** Every descendant file's size, summed. 0 when `count` is set. */
   size: number;
   /** The newest write anywhere inside. */
   time: number;
@@ -58,20 +64,25 @@ export type SortMode = 'name' | 'modified' | 'size';
  * directory on disk is therefore invisible, which is the right answer for a panel
  * whose question is "what has this loop written".
  */
-export function buildTree(files: LoopFileEntry[]): FolderNode {
+export function buildTree(
+  files: LoopFileEntry[],
+  /**
+   * Folders listed explicitly, with their entry counts - the project, which is
+   * fetched one open folder at a time, so a closed folder has no files here to be
+   * inferred from. Absent for the flat listings, which keep their sums.
+   */
+  folders?: readonly { path: string; count: number }[],
+): FolderNode {
   const root = folder('', '');
   // Folder nodes by path, so a second file in a folder finds the node the first
   // one created rather than walking the children array looking for it.
   const index = new Map<string, FolderNode>([['', root]]);
 
-  for (const entry of files) {
-    const parts = entry.path.split('/').filter((p) => p.length > 0);
-    if (parts.length === 0) continue;
-    const name = parts[parts.length - 1]!;
-
+  /** The folder for `a/b/`, made along with any missing parents. */
+  const folderAt = (parts: string[]): FolderNode => {
     let parent = root;
     let prefix = '';
-    for (const part of parts.slice(0, -1)) {
+    for (const part of parts) {
       prefix += `${part}/`;
       let next = index.get(prefix);
       if (!next) {
@@ -81,6 +92,20 @@ export function buildTree(files: LoopFileEntry[]): FolderNode {
       }
       parent = next;
     }
+    return parent;
+  };
+
+  for (const entry of folders ?? []) {
+    const parts = entry.path.split('/').filter((p) => p.length > 0);
+    if (parts.length === 0) continue;
+    folderAt(parts).count = entry.count;
+  }
+
+  for (const entry of files) {
+    const parts = entry.path.split('/').filter((p) => p.length > 0);
+    if (parts.length === 0) continue;
+    const name = parts[parts.length - 1]!;
+    const parent = folderAt(parts.slice(0, -1));
 
     const time = entry.mtime.length > 0 ? Date.parse(entry.mtime) : 0;
     parent.children.push({
@@ -93,7 +118,8 @@ export function buildTree(files: LoopFileEntry[]): FolderNode {
     });
   }
 
-  aggregate(root);
+  // A partly fetched tree has no honest sums: folders stay 0, so they sort by name.
+  if (folders === undefined) aggregate(root);
   return root;
 }
 

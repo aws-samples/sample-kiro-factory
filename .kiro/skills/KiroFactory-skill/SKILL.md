@@ -1,6 +1,6 @@
 ---
 name: KiroFactory-skill
-description: Design and generate Factory for Kiro documents (factory.json) - loops, loop clusters, wires, queues and topics that run unattended agent pipelines over a codebase or a set of documents. Use when building a factory, parallelising autonomous work across several agent loops or cluster nodes, writing or fixing loop prompts, choosing queue versus topic delivery, sizing a cluster or setting its comms, scoping tools and MCP servers per loop, choosing stop conditions, or debugging a factory that stalls, duplicates work, loops forever, runs up cost, or writes output to the wrong place.
+description: Design and generate Factory for Kiro documents (factory.json) - loops, loop clusters, wires, queues and topics that run unattended agent pipelines over a codebase or a set of documents - including Kiro Dark Factories, whose heavy work runs as remote Kiro Flock clusters and whose local loops do only what needs the operator's machine. Use when building a factory, parallelising autonomous work across several agent loops or cluster nodes, writing or fixing loop prompts, choosing queue versus topic delivery, sizing a cluster or setting its comms or its flock algorithm (amorphous, mesh, swarm, single), scoping tools and MCP servers per loop, choosing stop conditions, combining the factory with a flock, deciding what goes local versus remote, writing a flock direction as a loop prompt, sizing run modes and intervals for an unattended multi-day run, or debugging a factory that stalls, duplicates work, waits on itself, idles a remote cluster, loops forever, runs up cost, or writes output to the wrong place.
 ---
 
 # Factory for Kiro
@@ -18,12 +18,19 @@ code.
 One JSON file is the whole factory. It is also the interchange format: export writes exactly this,
 import reads exactly this.
 
+**A factory is a folder.** The document lives at `<project>/.kirofactory/factory.json`, and the
+folder that holds `.kirofactory/` is the project the loops work in. So a document carries no
+location and no identity:
+
+- **Do not write `id`.** The app mints one the first time the folder is opened and writes it back.
+  An invented or copied id is how two factories end up claiming the same identity.
+- **Do not write `baseDir`.** The folder the document sits in is the base directory. A `baseDir` in
+  the file is ignored.
+
 ```json
 {
   "kirofactory": 1,
-  "id": "f-<base36-time>-<4 random>",
   "name": "MyFactory",
-  "baseDir": "/absolute/path/to/the/project",
   "parameters": [
     { "name": "topic", "value": "quantum error correction", "description": "what this run is about" }
   ],
@@ -50,7 +57,6 @@ Fields, and what absent means:
 
 | Field | Meaning |
 |---|---|
-| `baseDir` | Absolute path the loops run in. The agents' working directory. |
 | `parameters` | Factory-level named values every prompt here can write as `@name`. **Absent means none.** See below. |
 | `autoStop` | Let the loop stop itself when its agent judges the job done. Two-turn handshake: the agent declares `NO FURTHER WORK`, then must confirm with `CONFIRM STOP` on the next turn having contributed nothing. |
 | `stopAfterIterations` | End the run after this many turns *of that run* - a restart gives the full count again. Integer ≥ 1. |
@@ -77,6 +83,7 @@ hand-written value off that ladder is kept as written.
 | `model` | Model id. Absent means the machine default. The catalogue is discovered at runtime, so do not invent ids. Leave absent unless you know the id. |
 | `worktree` | Give every session of this component its own git checkout of the repository, on its own branch. **Absent means no**, and all the loops share `baseDir`. See below. |
 | `cluster` | Run this component as several sessions instead of one. **Absent means a plain loop.** See below. |
+| `remote` | Run this component as a cluster on a Kiro Flock the operator already has, not on this machine. **Absent means local.** `{ "kind": "flock", "connection": "<id>", "algorithm"?: "amorphous"\|"mesh"\|"swarm"\|"single", "neighbourRadius"?: n, "swarmK"?: k, "taskSize"?: "small"\|"medium"\|"large"\|"xlarge", "browser"?: true, "trustDeploy"?: true, "selfOptimizing"?: true }`. See below. |
 | `x`, `y` | Position on the factory floor. Required by the renderer, meaningless to behaviour. |
 
 ### Parameters
@@ -245,33 +252,90 @@ Everything a factory needs on disk lives under one folder inside `baseDir`:
 <baseDir>/.kirofactory/loops/<id>/n1/, n2/   one per cluster node, its own @loop
 <baseDir>/.kirofactory/loops/<id>/flock/     a cluster's ring logs, one file per node
 <baseDir>/.kirofactory/worktrees.json        which session owns which checkout, per machine
+<baseDir>/.kirofactory/remote.json           which remote loop drives which flock cluster, per machine
+<baseDir>/.kirofactory/remote/<conn>/<id>/   a remote loop's bridge folder: items in flight
 ```
 
 A component with `worktree: true` also gets directories *outside* `baseDir`: one checkout per
 session under `<parent>/<repo>-loops/`, beside the repository. Those are made and removed through
 git, never by the app's own deletes.
 
+### Remote loops
+
+`remote` makes the component a cluster on a Kiro Flock: the nodes are Fargate tasks on the
+operator's flock, the prompt is the cluster's direction, and the queues are the cluster's own S3
+(`environment/<clusterId>/queue/in|out|claimed/`). The factory moves items between the loop's wires
+and those folders. Everything else about wiring is unchanged - a remote loop reads and writes
+wires exactly as a local cluster does.
+
+```json
+{ "remote": { "kind": "flock", "connection": "fc-9k2x" }, "cluster": { "size": 6 }, "autoPause": true }
+```
+
+**`algorithm` is how the nodes talk**, the flock's own four. `amorphous` (the default; leave it
+out) is a ring, each node reading its neighbours within `neighbourRadius`; it scales and the
+neighbours' log lines are what let nodes split work without being told who takes what. `mesh` is
+every node reading every other - fine up to a handful. `swarm` is each node reading the `swarmK`
+most recently active, for larger clusters where a mesh is too much. `single` is no peers: each node
+works the direction alone, so `size` single nodes are that many independent fire-and-forget runs,
+and queue items still work because the queue hands out the work. Single is the one algorithm that
+allows `cluster.size: 1`; the others floor at 2. Write `swarmK` only with `swarm` (clamped to
+`1..size-1`) and `neighbourRadius` only matters to amorphous (`1..floor(size/2)`).
+
+What the parse forces, so do not write otherwise: `cluster.mode` is `fixed`, `cluster.comms` is
+`flock`, and `cluster.size` has **no local ceiling** (the flock's own cap applies at Start).
+`tools`, `mcp`, `worktree`, `autoStop` and `stopAfterIterations` are dropped - remote agents run
+`kiro-cli` with its defaults plus the flock's `s3` MCP server and have nothing from this machine,
+no checkout, and no single iteration count. `intervalSeconds` is capped at 3600. The run modes
+that remain are wait for work (`autoPause`, which maps to the flock's autopause), run forever, and
+`stopAfterHours` (enforced by the factory, so it fires while the factory is up or at reconnect).
+
+**Prompts for a remote loop must not name `@project`, an MCP server, a skill or a steering
+file**: there is nothing on the flock to answer to them, and Start refuses with the list.
+`@input`, `@output`, `@loop` and parameters are fine; the first three become S3 paths. The
+direction the nodes read tells them to move an item from `queue/in/` to `queue/claimed/in/` when
+they take it and to write results to `queue/out/`; you do not write that protocol into the prompt.
+Two nodes may take the same item; that is accepted and the cluster converges. Delivery onto the
+downstream wires is at least once, so a consumer should key on the item `id`.
+
+`connection` names an entry in the operator's own `~/.kirofactory/flocks.json`. It is machine-
+local: a library entry carries it blank and the operator picks a connection when the design lands
+on a canvas. Do not invent one. The cluster id on the flock is derived from the connection, the
+factory and the loop, so it is never written in the document.
+
+**Nothing in the document stops a remote cluster.** Deleting the loop, closing the factory,
+disabling it (refused while live), editing it - none of these touch the flock. Only the operator's
+Stop, Force stop, Delete, or the `stopAfterHours` mode do. Say so when handing over a design with
+a remote loop: it bills until somebody stops it.
+
+**The document and the flock stay in step while the factory is attached**, both ways, latest
+writer wins. An edit on the flock's dashboard (model, interval, autopause, direction, and the
+restart-required size, algorithm, radius, K, task size, browser) lands in the document within
+fifteen seconds; an edit to the document reaches the flock at once. A direction edited on the
+flock comes back as the prompt with `@input`-style words restored; parameter values stay values.
+So a document is not a one-shot: what the operator tunes on either side is what the design says.
+A design with several remote loops and the local loops around them is a **dark factory**; see
+the section of that name below before writing one.
+
 That is the only place the app writes inside a project. There are two ways to get a generated
 document open, and which one is right depends on where the document already is.
 
-**A document already at `<baseDir>/.kirofactory/factory.json` wants Open**, in the tab strip:
-point it at the base directory and the factory opens in place, keeping its own id. This is the
-case for anything you generated straight into a project, and it is also how a closed tab comes
-back - the folder is still there, so nothing was lost by closing it. The picker only offers Open
-on a folder that actually holds a factory, so it is never a guess.
+**Write the document straight into the project and tell the operator to Open that folder.** Save
+it as `<project>/.kirofactory/factory.json`, with no `id` and no `baseDir`, then say: press
+**Open** and click the project's row, or paste its path and press Enter. The factory opens in
+place and the app gives it an id. This is also how a closed tab comes back - the folder is still
+there, so nothing was lost by closing it.
 
-**A document from somewhere else wants Import**: drop the JSON onto the factory floor, or use the Import
-button. Import may have to invent an id - the `baseDir` in a file written on another machine is a
-path that may not exist here - so it can produce a copy rather than the original. That is the
-right behaviour for a factory arriving from elsewhere and the wrong behaviour for one already in
-place, which is the whole distinction between the two buttons.
+**A document from somewhere else wants Import**: drop the JSON onto the factory floor, or use the
+Import button. The app then asks which folder it goes in, starting in the default folder for new
+factories, and refuses a folder that already holds a factory. If a factory with the same id is
+already on this machine, the import gets a fresh id, because it is a copy.
 
-Do not point an existing tab's base directory at a folder holding another factory's document. The
-server refuses it, because two factories cannot share a directory.
+A factory cannot be moved to another folder in place, and two factories cannot share one. To use
+a design somewhere else, Export it and Import it there.
 
-A factory you create without naming a directory gets a folder of its own under `app/workspaces/`,
-named by its id. Generated documents should carry an explicit absolute `baseDir` instead - the
-project the loops are meant to work in.
+`+` creates an empty factory in a folder of its own inside the default folder: `app/workspaces/`
+unless the operator picked another one in the Open picker.
 
 ## Wires
 
@@ -663,9 +727,7 @@ loop, four files of output, no contention.
 ```json
 {
   "kirofactory": 1,
-  "id": "f-example-docs",
   "name": "DocsFactory",
-  "baseDir": "/path/to/repo",
   "loops": [
     {
       "id": "loop-survey",
@@ -783,6 +845,204 @@ The folders organise without deciding: whether an entry is a loop or a cluster i
 it, names and values both, as the worked example of what it expects.
 
 Then say plainly what the factory will do unattended, and where its blast radius ends.
+
+## Dark factory
+
+A dark factory is a document with at least one remote loop: a cluster whose nodes are Fargate
+tasks on a Kiro Flock. The factory draws the pipeline and moves items; the flock does the work and
+keeps working when the laptop is closed. Everything above about the document, wires, `@tokens`
+and the library still holds. What follows is the plain factory reshaped around one lesson learned
+the hard way: **a flock is a self-organising system, and the factory's job is to feed and observe
+it, not to manage it.** Read the flock skill (`kiro-flock-compact`, sections 1, 2, 8 and the File
+Writing / Verification blocks) for how a cluster behaves; the operator's guide to the shapes is
+`DARK-FACTORY.md` in the repository.
+
+### The one failure to design against
+
+The first dark factory built with these two tools stalled four separate ways, all from the same
+mistake: treating the remote cluster as a worker that needs a manager.
+
+| What was done | What happened |
+|---|---|
+| Local loop uploads the seed, remote cluster builds from it | Cluster started first, found an empty share, wrote `BLOCKED` notes and idled. Seed loop did one phase per turn and never reached the upload. |
+| Remote cluster told "these files are owned by the local machine, never write them" | Cluster could not unblock itself. It built against guessed data instead. |
+| Consumers in Wait for work, producers in Auto stop | Each side waited for the other's item. Items piled up in queues while the loop that should read them was asleep. |
+| Architect / builders / reviewers / gate / integrator as separate clusters, claim files to coordinate | 143 coordination notes for 28 units of work. Three agents flipped one contract back and forth. |
+| `tools: [read, write, shell]`, `mcp: []` on local loops | Loops could not reach the flock MCP or run the real app. |
+
+The flock skill says all of this up front: let agents self-organise, do not put per-agent
+instructions in a direction, never-idle priority lists, redundancy is a feature. The design rules
+above about pools, gates and claim ledgers are for *local* loops that cannot see each other. A
+flock ring can. Do not import the factory's topology habits onto a flock.
+
+### Dark factory rules
+
+**1. The flock is complete on its own.** Write the remote direction so the cluster could finish the
+whole job if every local loop were deleted. It has the internet, Node, npm, the AWS CLI with the
+agent role, and S3. It can fetch its own data, write its own seed, run its own tests, call Bedrock,
+and judge its own output. Anything the direction says the cluster may not create is a thing the
+cluster will wait for. State the deliverable, the hard rules, and the unit list *inside the
+direction*. Do not point at a plan file the local side has to upload first; if a plan file is
+useful, tell the cluster to write it from the direction when it is missing.
+
+**2. Local loops do only what genuinely needs the machine.**
+
+| Needs the machine | Why |
+|---|---|
+| Binary assets into S3 | `s3_write` is text-only on the flock; the AWS CLI on the node works too, so even this is optional |
+| The operator's git history | Commits on the operator's branch |
+| The operator's AWS credentials | When the agent role must not have Bedrock or deploy rights |
+| Scraping a site that blocks data centres | Residential IP |
+| Showing the operator a running UI | Browser on the laptop |
+
+Everything else is remote. A local loop that does remote-able work is a dependency the flock did
+not need. Three local roles cover nearly every project: **Harvest** (real data in, offered to the
+share), **Sync** (pull, real build, real run, report, commit), and nothing else.
+
+**3. Wires carry news, never permission.** A wire is a folder; `Wait for work` is what makes a loop
+sleep on it. In a dark factory **no loop uses Wait for work** (`autoPause: true`). Every loop is Run
+forever on its own clock: the remote cluster with `autoPause: false` and `intervalSeconds` 30 to
+120 (the flock's `loopIntervalSeconds`); local loops with no run mode field (reads as Run forever)
+and `intervalSeconds` on the hour ladder (30 min, 1 h) - a local loop with no interval spins at full
+speed and bills every turn. Prompts then say: "Take whatever is in `@input`. An empty `@input`
+changes nothing; you proceed anyway." A loop that can act on an item but never needs one is
+independent and still informed.
+
+Draw the wires. Harvest -> cluster ("fresh data on the share"), cluster -> Sync ("this changed"),
+Sync -> cluster ("the real build and real pages say this"). Each producer has exactly one mode
+(queue). A wire-less design throws away the only channel the two sides have; a wire-with-Wait-for-
+work design turns that channel into a lock. The UI default for a *new* loop is Auto stop; switch it.
+Remote loops offer only Autopause, Run forever and After N hours; never pick Autopause for a cluster
+whose work has no natural end, and remember autopause on the flock pauses after three idle
+iterations while the Fargate tasks keep billing.
+
+**4. One cluster, one direction, never idle.** Follow flock skill section 8 for the remote loop: a
+single amorphous cluster, radius 2, 8 to 16 nodes, `autoPause: false`, and a priority list the
+direction says to work top-down, exactly one item per iteration:
+
+1. Fix an open issue (one file per issue in `ops/issues/`, delete when verified).
+2. Build the next missing unit from the list, one per iteration, picking one your neighbours' last log lines do not name.
+3. Verify a unit you did not build, with the real data; file what you find.
+4. Generate and judge real output (for an app: run it, call the model, score the pages).
+5. Improve the templates or prompts from what was judged.
+6. Work a backlog that never drops below 20 items, and keep that file bounded (rewrite, cap at N items, archive done ones): a never-idle cluster told to keep a backlog appended it to 309 KB in four hours.
+
+Include the flock's `## NEVER DO THIS` block verbatim, with the project's own additions (never
+deploy, never return HTML, never edit a contract without updating all consumers in the same
+iteration). Do **not** split roles into clusters (architect, builders, reviewers, gate). Do **not**
+ask for CLAIM, WITHDRAW or BLOCKED notes; neighbours read the log line, that is the coordination.
+Do **not** reserve a phase for "agent 0". Two agents on one unit is fine; the later one re-syncs
+and merges.
+
+The other algorithms have their places. `mesh` for a handful of nodes that must all see every
+change. `swarm` when the cluster is large enough that a ring spreads news too slowly. `single` for
+a pool of lone workers on queue items with no shared project to converge on - a fan-out of
+independent jobs - where neighbours would only be noise; it is also the one that runs at one node.
+For a shared project built in S3, amorphous.
+
+**5. File writing and verification, stated from iteration zero.** Copy both blocks from the flock
+skill into every remote direction. *File writing*: S3 is the working tree; `s3_sync_local` to work,
+`s3_write` before the iteration ends, sync again right before writing; local disk only to install,
+build, run; binaries via `aws s3 cp` into the same prefix; never node_modules, dist, zips.
+*Verification contract*: "I wrote it" is not "it works"; done means fresh sync, clean install,
+typecheck, tests, run with real data; a fix is verified against the bytes on the share. Left
+unstated, a flock takes hours to invent these and claims drift from reality in the meantime.
+
+**6. The share is a folder the cluster owns, and the local side reads.** Put the project at a fixed
+prefix (`environment/<share-id>/`) and name it in two parameters: `share` (the path, for the
+direction) and `share_id` (the folder name, for `env_upload` / `env_download_all` / `env_list` on
+the local side). The factory's own queue folders live under the cluster's `environment/kf-<id>/`;
+keep the project out of there so a factory re-import (new `kf-` id) does not orphan it. Nothing on
+the share is "owned by the local machine". Harvest *offers* fresh real data by uploading it; the
+direction tells the cluster to prefer real data when present and to make its own when absent. Sync
+*pulls* the whole share and never pushes source back; its feedback is a report file plus a queue
+item. Single writer for source (the cluster), single writer for the report (Sync), no ownership
+rule that can block anyone.
+
+**7. All tools, all MCP servers.** Omit `tools` and `mcp` on every loop. A document that names no
+grant is unrestricted. Narrowing a local loop to `[read, write, shell]` and `mcp: []` took away the
+flock MCP it needed and the ability to run the app. A dark factory is pointed at a directory and a
+flock you are willing to let an unattended agent loose on; that is the containment, not the grant
+list. Remote loops cannot carry `tools` or `mcp` at all (the server rejects them). The one case
+for narrowing is a text-only loop with no queue and no need to run anything, and a dark factory
+rarely has one.
+
+**8. Start order does not matter, and clean the share when you mean it.** Because nothing waits,
+Start all three in any order. Starting the cluster before any seed exists is fine: priority 2
+makes it fetch the data itself. What *does* matter is leftovers: a previous run's files on the
+share are the new run's starting state. Clean `environment/<share-id>/` from the flock dashboard
+for a fresh build; otherwise say so in the direction ("continue from what is on the share").
+
+**9. Budget and stop.** Fargate bills while running *and* paused. Only the zap (bolt) ends the
+tasks; Pause and Stop all do not. Say in the hand-over which card to zap and that `After N hours`
+is the only timed stop a remote loop offers. Each cluster iteration and each Sync run also costs
+model calls; the interval is the lever, set from measured `durationMs`, not aspiration.
+
+**10. Tune on either side.** The settings and the direction sync both ways while the factory is
+attached, latest writer wins, so an operator may tune the cluster from the flock's dashboard
+mid-run and the document follows. Design for that: do not hard-code in a local prompt a value the
+remote loop's settings carry (its interval, its node count); read it from the document if needed.
+
+### Reference dark topology
+
+```
+LOCAL (hourly)             REMOTE (30 s, forever)                 LOCAL (30 min)
+Harvest ──queue──▶  DevCluster (12 nodes, amorphous, r=2)  ──queue──▶  Sync
+real data, images,          builds and improves the whole           pull, build for real,
+look; "fresh seed"          project in S3; "this changed"           run, judge, report, commit
+                                        ▲                                   │
+                                        └───────────────queue───────────────┘
+                                                "real build says this"
+```
+
+Three loops, three queue wires, no Wait for work, no grants, one cluster. This shape worked: in
+about four hours a 12-node cluster produced a full multi-workspace TypeScript project that built
+green locally and passed every hard-rule check on real generated pages.
+
+### Before you run a dark factory
+
+- Every loop: no `autoPause: true`. Local loops carry `intervalSeconds`; the remote carries the flock interval.
+- No loop carries `tools` or `mcp`.
+- The remote direction contains: the deliverable and hard rules in full, the unit list in build order, the never-idle priority list, `## NEVER DO THIS`, the File Writing block, the Verification contract, and an explicit "empty `@input` means nothing" line.
+- The remote direction names nothing as "local-only, never write it".
+- Every prompt names `@project` (local) or the share path (remote). `@project` is refused on a remote loop.
+- Each producer has one wire mode. Fan-in needs nothing.
+- Parameters `share` and `share_id` exist and match.
+- The flock connection id is per machine; a document moved to another laptop needs its connection picked again.
+- The operator knows: which card to zap, that the share holds the previous run, and that `kiro-cli` (not the IDE) must have the flock MCP for the local loops.
+- Local loops that call AWS die silently when the AWS SSO session expires mid-run (Bedrock "Could not load credentials", the flock MCP's "Browser login timed out"); refresh before a multi-hour run, and name that as the usual cause of a sudden wave of fallbacks.
+
+Check structurally with the factory's own parser and remote validator rather than a hand-rolled
+script: import `server/factory.ts` `parse` and `server/flock/validate.ts` `startProblems` from
+`app/` and run them on the document.
+
+### Anti-patterns, dark-factory edition
+
+**A seed loop the cluster waits for.** The cluster idles until a human notices. Let the cluster
+seed itself; let the local loop offer better data.
+
+**Wait for work on either side.** Items queue while the reader sleeps. Run forever on a clock, read
+whatever arrived.
+
+**Hand-over items ("ready", "milestone").** They race, duplicate and go stale; the next side
+processes an old one. Send change notes and reports, never permission to proceed.
+
+**Role clusters with claim files.** Coordination notes outnumber work. One cluster, one direction,
+neighbours' log lines.
+
+**"Agent 0 does X."** Per-agent instructions in a shared direction; the flock skill forbids it, and
+the node that holds the item is never the one you named.
+
+**Narrow grants on local loops.** The loop that needs the flock MCP or the dev server has neither.
+
+**No wires at all.** Independence by amputation. The sides stop learning from each other.
+
+**Leaving the previous run on the share and expecting a fresh build.** The cluster continues from
+what it finds.
+
+**A Sync loop whose commit is gated on a green test run.** One flaky test leaves the local repo
+rounds behind the share. Commit on install, typecheck and build passing; report test failures
+separately.
 
 ## Safety
 

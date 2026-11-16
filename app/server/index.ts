@@ -28,6 +28,7 @@
  *   GET    /api/factories/:f               the document
  *   PUT    /api/factories/:f               replace the document (the canvas saves here)
  *   PATCH  /api/factories/:f               rename, or move to another directory
+ *   POST   /api/factories/:f/reload        read its design again: the library entry, or its own file
  *   DELETE /api/factories/:f               close the tab; the entry and the files stay
  *   DELETE /api/factories/:f?files=yes     delete: also remove <baseDir>/.kirofactory
  *   GET    /api/factories/:f/export        the document as a download
@@ -50,19 +51,41 @@
  *   POST   /api/factories/:f/loops/:l/steer    an operator message for the loop
  *   POST   /api/factories/:f/start | /stop | /force-stop  all loops in the factory
  *   GET    /api/factories/:f/output/:l     output buffered for one loop
+ *   GET    /api/factories/:f/usage/:l      this run's finished iterations and their credits for one loop
+ *   GET    /api/factories/:f/usage-history every run of this factory, newest first, with its cost
  *   GET    /api/factories/:f/files                the project the loops build (&checkout= for a session's worktree)
  *   GET    /api/factories/:f/file?path=           one of those files, as text (&checkout= likewise)
  *   GET    /api/factories/:f/loops/:l/files       what one loop has written
  *   DELETE /api/factories/:f/loops/:l/files       clear the folder; the loop must be stopped
  *   GET    /api/factories/:f/loops/:l/file?path=  one of those files, as text
  *   DELETE /api/factories/:f/loops/:l/file?path=  delete just that one
- *   GET    /api/events                     SSE: status and output as they happen
+ *   GET    /api/events                     SSE: status, output and usage as they happen
+ *
+ *   Remote loops (Kiro Flock), see server/flock/:
+ *   GET    /api/flocks                     connections, without secrets
+ *   POST   /api/flocks                     add: {apiUrl, username, password, name?}
+ *   DELETE /api/flocks/:c                  remove a connection and its secrets (409 while loops use it)
+ *   PATCH  /api/flocks/:c                  rename
+ *   POST   /api/flocks/:c/signin | /signout
+ *   GET    /api/flocks/:c/models | /limits | /clusters      proxied, clusters annotated with owner
+ *   POST   /api/flocks/:c/probe            re-check the flock for the queue routes
+ *   POST   /api/flocks/:c/clusters/:id/stop   orphan handling (Kiro Factory clusters only)
+ *   DELETE /api/flocks/:c/clusters/:id        orphan handling: stop, unregister
+ *   GET    /api/factories/:f/remotes       which remote loops are live, for the delete dialogs
+ *   GET    /api/factories/:f/loops/:l/remote/stream?node=&kind=acp|console[&session=]
+ *   GET    /api/factories/:f/loops/:l/remote/sessions?node=
+ *   GET    /api/factories/:f/loops/:l/remote/files | /file?path=   read-only cluster files
+ *   GET    /api/factories/:f/loops/:l/remote/info
+ *   DELETE /api/factories/:f/loops/:l/remote[?files=yes]   stop and remove the cluster
+ *   POST   /api/factories/:f/loops/:l/remote/detach         leave it running, stop watching
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, type Dirent } from 'node:fs';
 import * as fsp from 'node:fs/promises';
+import { execFile } from 'node:child_process';
 import * as os from 'node:os';
+import { promisify } from 'node:util';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultDriver } from './acp.ts';
@@ -78,12 +101,20 @@ import {
   newFactoryId,
   parse,
   save,
+  withoutTrustDeploy,
   type Factory,
   type FactoryRef,
 } from './factory.ts';
 import * as git from './git.ts';
 import { readSessions } from './worktrees.ts';
 import { ConflictError, Host, type Emit } from './host.ts';
+import { SignedOutError } from './flock/auth.ts';
+import { FlockApiError, FlockClient, SESSION_ID_RE } from './flock/client.ts';
+import { ConnectionError, ConnectionStore } from './flock/connections.ts';
+import { readMarker } from './flock/direction.ts';
+import { INSECURE_FLOCK } from './flock/net.ts';
+import { DetachedStore } from './flock/sidecar.ts';
+import { StreamProxy } from './flock/stream.ts';
 import * as library from './library.ts';
 import { discoverModels, type ModelCatalog } from './models.ts';
 import {
@@ -182,6 +213,27 @@ const LEGACY_REGISTRY_FILE = path.join(appRoot, 'factories.json');
  * nobody asked for.
  */
 const GRANTS_FILE = path.join(path.dirname(REGISTRY_FILE), 'grants.json');
+
+/**
+ * The flocks this installation can drive remote loops on, beside the registry
+ * for the same reason the grants are: a connection is a credential holder and
+ * belongs to the operator, not to a project. Secrets live in a sibling
+ * directory the store manages; see server/flock/connections.ts.
+ */
+const FLOCKS_FILE = path.join(path.dirname(REGISTRY_FILE), 'flocks.json');
+
+/** App settings beside the registry. Holds the default folder for new factories. */
+const CONFIG_FILE = path.join(path.dirname(REGISTRY_FILE), 'config.json');
+const DETACHED_FILE = path.join(path.dirname(REGISTRY_FILE), 'remote-detached.json');
+const connections = new ConnectionStore(FLOCKS_FILE);
+const detached = new DetachedStore(DETACHED_FILE);
+const streamProxy = new StreamProxy();
+if (INSECURE_FLOCK) {
+  process.stderr.write(
+    'KIROFACTORY_INSECURE_FLOCK=1: plain http to loopback is allowed for flock connections.\n' +
+    '  This is for the mock flock (npm run mock-flock). Do not run a real factory this way.\n',
+  );
+}
 const WEB_DIST = path.join(appRoot, 'web', 'dist');
 
 const driver = defaultDriver();
@@ -262,6 +314,38 @@ function modelCatalog(force = false): Promise<ModelCatalog> {
  */
 void modelCatalog();
 
+/**
+ * The oldest kiro-cli the loops run on. `KiroDriver` starts every turn with
+ * `--v3`, which 2.x does not have; `models.ts` reads the catalogue from the
+ * V3 session shape; `usage.ts` reads V3 session metering. On an older CLI all
+ * three fail in ways that look like something else (a loop that exits at once,
+ * an empty model picker, every turn unmetered), so the version is read once at
+ * startup and the mismatch is said plainly. A warning, not an exit: the echo
+ * driver and the mock flock need no kiro-cli at all.
+ */
+const KIRO_CLI_MIN = { major: 3, minor: 0 };
+void (async () => {
+  if (process.env.LOOP_DRIVER === 'echo') return;
+  const cli = process.env.KIRO_CLI ?? 'kiro-cli';
+  let out: string;
+  try {
+    out = (await promisify(execFile)(cli, ['--version'], { timeout: 10_000 })).stdout;
+  } catch (e) {
+    process.stderr.write(`  kiro-cli: could not run \`${cli} --version\` (${(e as Error).message}); loops will fail to start until it is on the PATH\n`);
+    return;
+  }
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(out);
+  if (m === null) return;
+  const [major, minor] = [Number(m[1]), Number(m[2])];
+  if (major < KIRO_CLI_MIN.major || (major === KIRO_CLI_MIN.major && minor < KIRO_CLI_MIN.minor)) {
+    process.stderr.write(
+      `  kiro-cli ${m[0]} is older than ${KIRO_CLI_MIN.major}.${KIRO_CLI_MIN.minor}, which this factory needs: ` +
+        `loops run on the V3 harness, and the model list and credit metering read its session format. ` +
+        `Update kiro-cli (https://kiro.dev/docs/cli/installation/) and restart.\n`,
+    );
+  }
+})();
+
 const registry = new Registry(REGISTRY_FILE);
 const hosts = new Map<string, Host>();
 const clients = new Set<ServerResponse>();
@@ -341,7 +425,7 @@ async function open(ref: { id: string; name: string; baseDir: string }): Promise
         `  ${err.message}\n` +
         `  A copy is at ${aside}. The tab opens empty; the first edit will overwrite ${file}.\n\n`,
     );
-    const host = new Host({ ...empty(ref), id: ref.id, name: ref.name, baseDir: ref.baseDir }, driver, emitFor(ref.id));
+    const host = new Host({ ...empty(ref), id: ref.id, name: ref.name, baseDir: ref.baseDir }, driver, emitFor(ref.id), connections);
     hosts.set(host.id, host);
     return host;
   }
@@ -349,81 +433,110 @@ async function open(ref: { id: string; name: string; baseDir: string }): Promise
   // a document that was edited underneath us. The document is then written back
   // so the two agree.
   const factory: Factory = { ...doc, id: ref.id, name: ref.name, baseDir: ref.baseDir };
-  const host = new Host(factory, driver, emitFor(ref.id));
+  const host = new Host(factory, driver, emitFor(ref.id), connections);
   await save(factory);
   await host.prepare();
   hosts.set(host.id, host);
   return host;
 }
 
+/* ------------------------------------------------------- the default folder */
+
 /**
- * Is this directory available to a factory?
+ * Where `+` puts a new factory: `<defaultDir>/<id>`.
  *
- * Available means no other factory's document is sitting in it and no open tab
- * claims it. Two factories cannot share a base directory: their documents would
- * be the same file.
- *
- * Open tabs only, deliberately: a closed factory must not block its own directory,
- * or reopening it would be impossible. Nothing is lost by that, because the closed
- * factory's document is still on disk in there and the second half of this function
- * finds it. A directory holding someone else's document is refused whether or not
- * that someone is currently a tab.
- *
- * The home directory is refused outright and before anything else, because it is not
- * about who is in it: `~/.kirofactory/` is the registry's directory, so no factory
- * can have that as its internal folder. See `isHomeDir`.
+ * Saved in `~/.kirofactory/config.json` when the operator picks one in the Open
+ * picker. Absent, it is `WORKSPACES` or `app/workspaces` (`AUTO_BASE`), so nobody
+ * who never sets it sees anything change.
  */
-async function isFree(dir: string, id: string): Promise<boolean> {
-  if (isHomeDir(dir)) return false;
-  if (registry.list().some((r) => r.id !== id && r.baseDir === path.resolve(dir))) return false;
-  const doc = docPath(dir);
-  if (!existsSync(doc)) return true;
+let savedDefaultDir: string | undefined;
+
+async function readConfig(): Promise<void> {
   try {
-    const raw: unknown = JSON.parse(await fsp.readFile(doc, 'utf8'));
-    const other = typeof raw === 'object' && raw !== null ? (raw as { id?: unknown }).id : undefined;
-    return typeof other !== 'string' || other === id;
+    const raw: unknown = JSON.parse(await fsp.readFile(CONFIG_FILE, 'utf8'));
+    const dir = isObject(raw) && typeof raw.defaultDir === 'string' ? raw.defaultDir : '';
+    savedDefaultDir = dir.length > 0 ? path.resolve(dir) : undefined;
   } catch {
-    // Nothing readable there is nothing worth protecting.
-    return true;
+    savedDefaultDir = undefined;
+  }
+}
+
+async function writeConfig(): Promise<void> {
+  await fsp.mkdir(path.dirname(CONFIG_FILE), { recursive: true });
+  const body = savedDefaultDir === undefined ? {} : { defaultDir: savedDefaultDir };
+  await fsp.writeFile(CONFIG_FILE, `${JSON.stringify(body, null, 2)}\n`, 'utf8');
+}
+
+function defaultDir(): string {
+  return savedDefaultDir ?? AUTO_BASE;
+}
+
+/** The folder a factory gets when nobody named one: `<default>/<id>`. */
+function ownBaseDir(id: string): string {
+  return path.join(defaultDir(), id);
+}
+
+/* ---------------------------------------------------------------- identity */
+
+/**
+ * Is this id already some other folder's factory?
+ *
+ * Taken means another registered folder carries it and still holds a document.
+ * Then the folder asking is a copy - a duplicated project, a clone - and is a
+ * different factory, so it gets a fresh id and its remote loops get their own
+ * clusters. A registered folder with no document left is a factory that moved, and
+ * its id is free to follow it: `Registry.put` replaces that stale row.
+ */
+function idTaken(id: string, baseDir: string): boolean {
+  const dir = path.resolve(baseDir);
+  return registry.listAll().some((r) => r.id === id && r.baseDir !== dir && existsSync(docPath(r.baseDir)));
+}
+
+/**
+ * The id a folder's factory has, by the one rule every way in follows.
+ *
+ * The registry's row for the folder wins, because that is the id the factory last
+ * ran under and remote cluster ids are derived from it. Then the document's own id.
+ * Either is kept only if no other folder's factory has it. Otherwise one is minted -
+ * which is also the answer for a document an agent wrote without an id.
+ */
+function identify(baseDir: string, docId: string | undefined): string {
+  const row = registry.at(baseDir);
+  if (row !== undefined && !idTaken(row.id, baseDir)) return row.id;
+  if (docId !== undefined && docId.length > 0 && !idTaken(docId, baseDir)) return docId;
+  return newFactoryId();
+}
+
+/** A request the operator can fix, answered with its status rather than a 500. */
+class Refusal extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
   }
 }
 
 /**
- * Can a document arriving from outside keep the id it carries?
+ * The folder a new factory is created in, given what was asked for.
  *
- * Only an *open* tab holding that id is a conflict. A closed entry with the same id
- * is the same factory coming back, and reusing its id is what puts it back where it
- * was instead of leaving a stale row behind and adding a second one. That is why
- * this asks `list()` rather than `get()`, now that `get()` answers for closed
- * factories too.
+ * Nothing asked is `<default>/<id>`. A folder asked for is used exactly as asked or
+ * refused - never quietly swapped for another, because the operator picked it on
+ * purpose. Refused when it already holds a factory (open that one instead) and when
+ * it is the home directory, whose `.kirofactory/` is the registry's. See `isHomeDir`.
  */
-function idFree(id: string): boolean {
-  return !registry.list().some((r) => r.id === id);
-}
-
-/** The home a factory gets when nobody named one: `workspaces/<id>`. */
-function ownBaseDir(id: string): string {
-  return path.join(AUTO_BASE, id);
-}
-
-/**
- * Where a factory goes, given what was asked for.
- *
- * A directory that is free is used as asked. One already claimed by another factory
- * falls back to a folder of the factory's own, because landing on top of somebody
- * else's document would be worse than landing somewhere unexpected.
- *
- * Every caller now passes `ownBaseDir(id)` when the operator named nothing, so the
- * preferred path is only ever a real request - imported from a file, or typed. The
- * first factory on a fresh install is therefore no different from the fifth.
- *
- * A directory the operator typed into the bar is never redirected like this: that
- * case errors instead, in Host.setBaseDir, because quietly using a different
- * directory than the one asked for is worse than refusing.
- */
-async function pickBaseDir(preferred: string, id: string): Promise<string> {
-  if (await isFree(preferred, id)) return path.resolve(preferred);
-  return ownBaseDir(id);
+function targetDir(asked: unknown, id: string): string {
+  if (typeof asked !== 'string' || asked.trim().length === 0) return ownBaseDir(id);
+  const dir = path.resolve(asked.trim());
+  if (isHomeDir(dir)) {
+    throw new Refusal(
+      400,
+      `A factory cannot live directly in your home directory - that is where the list of factories is kept. Make a folder for it instead - ${dir}`,
+    );
+  }
+  if (existsSync(docPath(dir)) || registry.at(dir) !== undefined) {
+    throw new Refusal(409, `That folder already holds a factory. Open it instead - ${dir}`);
+  }
+  return dir;
 }
 
 /* -------------------------------------------------------------- browsing */
@@ -514,6 +627,8 @@ async function browse(asked: string | null): Promise<{
   /** The directory above, or null at the root of the filesystem. */
   parent: string | null;
   home: string;
+  /** The listing is the folder asked for, not the nearest one above it that exists. */
+  exact: boolean;
   /**
    * The directory you are standing in holds a factory.
    *
@@ -536,7 +651,10 @@ async function browse(asked: string | null): Promise<{
   // A path that is not there is not an error worth showing: it is usually a
   // half-typed one. Walking up to the nearest directory that does exist means
   // browsing from a typed path lands you as close to it as the disk allows.
-  let dir = path.resolve(asked === null || asked.trim().length === 0 ? home : asked.trim());
+  // `~` is expanded because a pasted path often starts with it.
+  const typed = asked === null || asked.trim().length === 0 ? home : asked.trim().replace(/^~(?=$|\/)/, home);
+  const requested = path.resolve(typed);
+  let dir = requested;
   while (!existsSync(dir) && path.dirname(dir) !== dir) dir = path.dirname(dir);
   if (!existsSync(dir)) dir = home;
 
@@ -544,7 +662,7 @@ async function browse(asked: string | null): Promise<{
   // Built once for the whole listing rather than per row: it is the open-tab list,
   // and a hundred children would otherwise walk it a hundred times.
   const tabs = new Map(registry.list().map((r) => [r.baseDir, r.name]));
-  const head = { path: dir, parent, home, ...(await factoryFacts(dir, tabs)) };
+  const head = { path: dir, parent, home, exact: dir === requested, ...(await factoryFacts(dir, tabs)) };
 
   let names: string[];
   try {
@@ -557,6 +675,8 @@ async function browse(asked: string | null): Promise<{
 
   const entries: BrowseEntry[] = [];
   for (const name of names) {
+    // A factory's own internals are not a place to go or put anything.
+    if (name === INTERNAL) continue;
     const child = path.join(dir, name);
     try {
       // `stat`, not `lstat`: a symlink to a directory is a directory you can point
@@ -601,35 +721,36 @@ const FILE_MAX = 2 * 1024 * 1024;
 /**
  * Enough of a tree to see what a loop is doing; a runaway loop is not paginated.
  *
+ * For a loop's folder this caps the whole walk. For the project, which is listed
+ * one folder at a time, it caps one folder's entries: a folder of twelve thousand
+ * images shows its first ten thousand, by name, and says so.
+ *
  * The walk says when it hit this, and the panel repeats it, so the cap is a
- * visible limit rather than a silent lie about what the project contains. Ten
- * thousand because the panel only renders the folders you have opened: the cost
- * of a bigger list is a walk and a payload, both of which are cheap for a local
- * app, not a render.
+ * visible limit rather than a silent lie about what the project contains.
  */
 const FILE_COUNT_MAX = 10000;
 
+/** How many folders one project listing may ask for: the open ones, so not many. */
+const FOLDERS_PER_REQUEST_MAX = 500;
+
 /**
- * Directories the project walk does not enter, by exact name at any depth.
+ * Directories the project listing does not show, by exact name at any depth.
  *
- * Only the project walk: a loop's own folder is small and entirely of the loop's
- * own making, so pruning it would be second-guessing an agent about its own
- * scratch space. The project is the opposite case. `node_modules` alone is tens of
- * thousands of files, so an unfiltered walk spends the whole of FILE_COUNT_MAX
- * inside dependencies and returns a tree with no source in it - the browser would
- * be worse than useless, it would be actively misleading about what the project
- * contains.
+ * Only the project: a loop's own folder is entirely of the loop's own making, so
+ * pruning it would be second-guessing an agent about its own scratch space. In the
+ * project these are dependencies, build output and caches - tens of thousands of
+ * files that are not what the loops are building.
  *
  * A fixed list rather than reading `.gitignore`, which is a pattern language with
- * negations and precedence rules, and rather than lazy per-directory loading,
- * which is the right answer for a general browser and a much larger change: the
- * panel builds its tree client-side from one flat list. This is a panel for
- * orientation - see what the loops are building - and for that the list is enough.
+ * negations and precedence rules.
  *
- * `.kirofactory` is deliberately absent. It is in the project directory and the
- * operator has every reason to look at the queues from here.
+ * `.kirofactory` is here because everything in it that a reader wants is shown
+ * elsewhere: the loop view lists each loop's folder, and the app reads the queues
+ * through their own endpoints. Listing it again in the project spent thousands of entries on the
+ * factory's own bookkeeping.
  */
 const SKIP_DIRS = new Set([
+  '.kirofactory',
   '.git',
   'node_modules',
   'dist',
@@ -689,93 +810,193 @@ async function listLoopFiles(
   return { dir, ...(await walkFiles(root)) };
 }
 
+/** A folder in a project listing: where it is, and how many entries it holds. */
+interface ProjectFolderEntry {
+  /** Relative to the project, `/`-separated, with a trailing slash. */
+  path: string;
+  /** Its direct entries, after the same pruning the listing applies. */
+  count: number;
+}
+
 /**
- * The project itself, as the same flat listing.
+ * The project itself, one folder at a time.
  *
- * The counterpart of `listLoopFiles`, and the reason the panel is no longer only a
- * window onto a loop's scratch space. The loops build a real codebase in the base
- * directory - that is the whole point of the thing - and until now the only way to
- * see what they had built was to leave the app, which is the same gap the loop
- * panel was added to close.
+ * The counterpart of `listLoopFiles`. The loops build a real codebase in the base
+ * directory, and this is how the panel shows it without leaving the app.
+ *
+ * Only the folders the panel has open are listed: the root always, plus each path
+ * in `folders`. Each comes back as its direct files and its direct subfolders, and
+ * a subfolder carries its entry count so a closed one still says something. A
+ * project of any size then costs what is on screen. The single flat walk this
+ * replaced stopped at FILE_COUNT_MAX, and because it read in name order, a project
+ * whose dot-folders held ten thousand files of scratch lost every folder after them
+ * - which was all of its source.
  *
  * `dir` is the absolute base directory rather than a relative path, because there
  * is nothing above it to be relative to and the panel shows the string to say
  * where you are looking.
+ *
+ * `capped` names the folders that held more than FILE_COUNT_MAX entries, `''` for
+ * the root. Asked-for folders that are gone, outside the project, behind a symlink
+ * or pruned by SKIP_DIRS are left out rather than refused: an open folder that a
+ * loop has just deleted is ordinary, and the answer is that it has nothing in it.
  *
  * Read-only, and unlike the loop endpoints there is no delete beside it. These are
  * the operator's real source files, not a folder an agent was given to scribble in,
  * and a trash button in a panel meant for looking is not a thing to hand someone
  * by accident. Git is the tool for changing your mind about a project.
  */
-async function listProjectFiles(
+async function listProjectFolders(
   baseDir: string,
-): Promise<{ dir: string; files: LoopFileEntry[]; truncated: boolean }> {
-  if (!existsSync(baseDir)) return { dir: baseDir, files: [], truncated: false };
-  return { dir: baseDir, ...(await walkFiles(baseDir, SKIP_DIRS)) };
-}
+  folders: readonly string[] = [],
+): Promise<{
+  dir: string;
+  files: LoopFileEntry[];
+  folders: ProjectFolderEntry[];
+  capped: string[];
+  truncated: boolean;
+}> {
+  const empty = { dir: baseDir, files: [], folders: [], capped: [], truncated: false };
+  if (!existsSync(baseDir)) return empty;
+  let realRoot: string;
+  try {
+    realRoot = await fsp.realpath(baseDir);
+  } catch {
+    return empty;
+  }
 
-/**
- * `skip` prunes directories by name, and is only passed for the project walk.
- * Absent means walk everything, which is what a loop's own folder wants.
- *
- * `truncated` says the walk stopped at the cap rather than the bottom of the
- * tree. The distinction matters to the reader and only the walk knows it: a list
- * of exactly FILE_COUNT_MAX files could also be a project of exactly that size.
- */
-async function walkFiles(
-  root: string,
-  skip?: Set<string>,
-): Promise<{ files: LoopFileEntry[]; truncated: boolean }> {
-  const out: LoopFileEntry[] = [];
-  let truncated = false;
+  const files: LoopFileEntry[] = [];
+  const subfolders: ProjectFolderEntry[] = [];
+  const capped: string[] = [];
+  const wanted = new Set(['', ...folders.slice(0, FOLDERS_PER_REQUEST_MAX).map(asFolderPath)]);
 
-  async function walk(dir: string, prefix: string): Promise<void> {
-    if (out.length >= FILE_COUNT_MAX) {
-      truncated = true;
-      return;
-    }
-    let names;
-    try {
-      names = await fsp.readdir(dir, { withFileTypes: true });
-    } catch {
-      // Unreadable, or gone since its parent was listed. Either way there is
-      // nothing here to report and it is not worth failing the request over.
-      return;
-    }
-    for (const entry of names) {
-      if (out.length >= FILE_COUNT_MAX) {
-        truncated = true;
-        return;
-      }
-      if (entry.isSymbolicLink()) continue;
-      /*
-       * By name, whatever the entry turns out to be.
-       *
-       * It used to test directories only, which is wrong for exactly one entry in
-       * the list and it is the one that matters: in a linked worktree `.git` is a
-       * *file* holding a path to the real git directory, so a worktree's tree
-       * listed it while an ordinary checkout did not. Every other name in the set
-       * is a directory convention, and a file that happens to be called `dist` is
-       * not worth a second branch to keep.
-       */
-      if (skip?.has(entry.name)) continue;
-      const rel = prefix.length === 0 ? entry.name : `${prefix}/${entry.name}`;
-      const full = path.join(dir, entry.name);
+  for (const rel of wanted) {
+    if (rel === null) continue;
+    const full = await projectFolder(baseDir, realRoot, rel);
+    if (full === null) continue;
+    const entries = await visibleEntries(full, SKIP_DIRS);
+    if (entries === null) continue;
+    if (entries.length > FILE_COUNT_MAX) capped.push(rel);
+    for (const entry of entries.slice(0, FILE_COUNT_MAX)) {
+      const childRel = `${rel}${entry.name}`;
+      const childFull = path.join(full, entry.name);
       if (entry.isDirectory()) {
-        await walk(full, rel);
-      } else if (entry.isFile()) {
-        try {
-          const st = await fsp.stat(full);
-          out.push({ path: rel, size: st.size, mtime: st.mtime.toISOString() });
-        } catch {
-          out.push({ path: rel, size: 0, mtime: '' });
-        }
+        const inner = await visibleEntries(childFull, SKIP_DIRS);
+        subfolders.push({ path: `${childRel}/`, count: inner?.length ?? 0 });
+      } else {
+        files.push(await fileEntry(childFull, childRel));
       }
     }
   }
 
-  await walk(root, '');
-  return { files: out, truncated };
+  return { dir: baseDir, files, folders: subfolders, capped, truncated: capped.includes('') };
+}
+
+/**
+ * A folder path as the panel sends it, normalised to `a/b/`, or null if it is not
+ * one. `''` is the root and is always listed, so it is dropped here.
+ */
+function asFolderPath(raw: string): string | null {
+  const parts = raw.split('/').filter((p) => p.length > 0);
+  if (parts.length === 0) return null;
+  return `${parts.join('/')}/`;
+}
+
+/**
+ * Where a requested project folder is on disk, or null if the listing should not
+ * enter it.
+ *
+ * Containment is tested twice: on the path as given, which catches `..` and
+ * absolute paths, and on the real path, which catches a symlink inside the project
+ * pointing out of it. The listing never offers a symlinked folder, but a request
+ * can name one, and a read of somewhere else on the disk presented as part of the
+ * project is still a read of somewhere else. A path through a pruned folder is
+ * refused too, so asking for `.git/` does not list what the listing hides.
+ */
+async function projectFolder(baseDir: string, realRoot: string, rel: string): Promise<string | null> {
+  if (rel === '') return baseDir;
+  if (rel.split('/').some((part) => SKIP_DIRS.has(part))) return null;
+  const full = resolveInside(path.resolve(baseDir), rel.slice(0, -1));
+  if (full === null) return null;
+  try {
+    const real = await fsp.realpath(full);
+    if (!real.startsWith(realRoot + path.sep)) return null;
+    const st = await fsp.stat(real);
+    return st.isDirectory() ? full : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One folder's entries that a listing shows, sorted by name, or null if it cannot
+ * be read.
+ *
+ * Sorted so a capped folder always shows the same first slice rather than whatever
+ * order the filesystem returned. Symlinks are dropped - a link is the one thing in
+ * a directory that can point out of it - and so is anything named in `skip`.
+ *
+ * `skip` is tested by name whatever the entry turns out to be. Testing directories
+ * only was wrong for exactly one entry in the list and it is the one that matters:
+ * in a linked worktree `.git` is a *file* holding a path to the real git directory,
+ * so a worktree's tree listed it while an ordinary checkout did not.
+ */
+async function visibleEntries(dir: string, skip?: Set<string>): Promise<Dirent[] | null> {
+  let entries: Dirent[];
+  try {
+    entries = await fsp.readdir(dir, { withFileTypes: true });
+  } catch {
+    // Unreadable, or gone since its parent was listed. Either way there is
+    // nothing here to report and it is not worth failing the request over.
+    return null;
+  }
+  return entries
+    .filter((e) => !e.isSymbolicLink() && !(skip?.has(e.name) ?? false) && (e.isDirectory() || e.isFile()))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
+/** A file's listing row. A file that vanished since the readdir keeps its row, blank. */
+async function fileEntry(full: string, rel: string): Promise<LoopFileEntry> {
+  try {
+    const st = await fsp.stat(full);
+    return { path: rel, size: st.size, mtime: st.mtime.toISOString() };
+  } catch {
+    return { path: rel, size: 0, mtime: '' };
+  }
+}
+
+/**
+ * Every file under one loop's folder, flat, stopping at FILE_COUNT_MAX.
+ *
+ * Breadth-first: every folder's own files are listed before anything one level
+ * deeper. When the cap is hit, what is missing is the bottom of the tree, so the
+ * shape of the folder is still on screen. The depth-first walk this replaced spent
+ * the whole cap inside whichever subfolder sorted first and showed nothing of the
+ * rest.
+ *
+ * `truncated` says the walk stopped at the cap rather than the bottom of the
+ * tree. The distinction matters to the reader and only the walk knows it: a list
+ * of exactly FILE_COUNT_MAX files could also be a folder of exactly that size.
+ */
+async function walkFiles(root: string): Promise<{ files: LoopFileEntry[]; truncated: boolean }> {
+  const out: LoopFileEntry[] = [];
+  const queue: { dir: string; prefix: string }[] = [{ dir: root, prefix: '' }];
+
+  for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+    const entries = await visibleEntries(next.dir);
+    if (entries === null) continue;
+    for (const entry of entries) {
+      const rel = next.prefix.length === 0 ? entry.name : `${next.prefix}/${entry.name}`;
+      const full = path.join(next.dir, entry.name);
+      if (entry.isDirectory()) {
+        queue.push({ dir: full, prefix: rel });
+        continue;
+      }
+      if (out.length >= FILE_COUNT_MAX) return { files: out, truncated: true };
+      out.push(await fileEntry(full, rel));
+    }
+  }
+  return { files: out, truncated: false };
 }
 
 /**
@@ -1106,7 +1327,67 @@ const server = createServer(async (req, res) => {
       // `baseDir` is the directory new factories are created *under*, one folder
       // each - not a path any factory has. It was a single shared default once,
       // which is what the singular name is left over from.
-      return json(res, 200, { baseDir: AUTO_BASE, internal: INTERNAL, driver: driver.name });
+      return json(res, 200, { baseDir: defaultDir(), internal: INTERNAL, driver: driver.name });
+    }
+
+    /*
+     * The default folder for new factories, and the built-in one it falls back to.
+     *
+     * PUT `{ defaultDir: "/abs/path" }` saves it; `{ defaultDir: null }` resets to the
+     * built-in. The folder must exist, must be a directory, and must not be the home
+     * directory itself, whose `.kirofactory/` is the registry's.
+     */
+    if (url === '/api/config' && method === 'GET') {
+      return json(res, 200, { defaultDir: defaultDir(), builtinDefaultDir: AUTO_BASE });
+    }
+
+    if (url === '/api/config' && method === 'PUT') {
+      const body = await readBody(req);
+      if (!isObject(body) || !('defaultDir' in body)) return json(res, 400, { error: 'expected { defaultDir }' });
+      if (body.defaultDir === null) {
+        savedDefaultDir = undefined;
+      } else {
+        if (typeof body.defaultDir !== 'string' || body.defaultDir.trim().length === 0) {
+          return json(res, 400, { error: 'defaultDir must be a path or null' });
+        }
+        const dir = path.resolve(body.defaultDir.trim());
+        const stat = await fsp.stat(dir).catch(() => undefined);
+        if (stat === undefined || !stat.isDirectory()) return json(res, 400, { error: `Not a folder - ${dir}` });
+        if (isHomeDir(dir)) {
+          return json(res, 400, { error: 'New factories cannot go directly into your home directory. Pick or make a folder inside it.' });
+        }
+        savedDefaultDir = dir === AUTO_BASE ? undefined : dir;
+      }
+      await writeConfig();
+      return json(res, 200, { defaultDir: defaultDir(), builtinDefaultDir: AUTO_BASE });
+    }
+
+    /*
+     * Make a folder from the picker, and answer with its listing.
+     *
+     * `{ parent, name }`. One plain name, no separators and no leading dot, created
+     * inside a folder that already exists under the home directory. That is the whole
+     * of what the picker's "New folder" needs, and nothing else can be reached
+     * through it. Gated like every other write here by the per-run token.
+     */
+    if (url === '/api/browse/mkdir' && method === 'POST') {
+      const body = await readBody(req);
+      const parent = isObject(body) && typeof body.parent === 'string' ? path.resolve(body.parent) : '';
+      const name = isObject(body) && typeof body.name === 'string' ? body.name.trim() : '';
+      if (name.length === 0 || name.length > 255 || /[/\\\0]/.test(name) || name.startsWith('.')) {
+        return json(res, 400, { error: 'A folder name is one plain name, with no slashes and no leading dot.' });
+      }
+      const home = os.homedir();
+      const rel = path.relative(home, parent);
+      if (parent.length === 0 || rel.startsWith('..') || path.isAbsolute(rel)) {
+        return json(res, 400, { error: 'New folders can only be made inside your home directory.' });
+      }
+      const stat = await fsp.stat(parent).catch(() => undefined);
+      if (stat === undefined || !stat.isDirectory()) return json(res, 400, { error: `Not a folder - ${parent}` });
+      const dir = path.join(parent, name);
+      if (existsSync(dir)) return json(res, 409, { error: `${name} already exists here.` });
+      await fsp.mkdir(dir);
+      return json(res, 201, await browse(dir));
     }
 
     /*
@@ -1237,8 +1518,8 @@ const server = createServer(async (req, res) => {
      * question behind it.
      *
      * `baseDir` is the one thing the entry cannot supply. Given one, that is where it
-     * lands; without one it gets a directory of its own under the app, the same as any
-     * factory created without a folder in mind.
+     * lands, or the take-out is refused if a factory is already there; without one it
+     * gets `<default>/<id>`. See `targetDir`.
      */
     const takeOut = /^\/api\/library\/factories\/([^/]+)\/open$/.exec(url);
     if (takeOut && method === 'POST') {
@@ -1252,11 +1533,7 @@ const server = createServer(async (req, res) => {
         typeof wanted.name === 'string' && wanted.name.trim().length > 0
           ? wanted.name.trim()
           : entry.name;
-      const asked =
-        typeof wanted.baseDir === 'string' && wanted.baseDir.trim().length > 0
-          ? wanted.baseDir.trim()
-          : ownBaseDir(id);
-      const baseDir = await pickBaseDir(asked, id);
+      const baseDir = targetDir(wanted.baseDir, id);
 
       await save(
         parse(
@@ -1267,6 +1544,9 @@ const server = createServer(async (req, res) => {
             loops: entry.loops,
             wires: entry.wires,
             ...(entry.parameters !== undefined ? { parameters: entry.parameters } : {}),
+            // Remembered so the copy can be brought back in step with the entry
+            // later - see `/api/factories/:f/reload`.
+            source: { library: entry.slug },
           },
           { id, name, baseDir },
         ),
@@ -1364,9 +1644,12 @@ const server = createServer(async (req, res) => {
             skipped.push(here);
             continue;
           }
-          const known = registry.get(hit.id);
+          // A document with no id is one an agent wrote; it gets one here.
+          const known = hit.id.length > 0 ? registry.get(hit.id) : undefined;
           if (known === undefined) {
-            added.push(await registry.adopt({ id: hit.id, name: hit.name, baseDir: hit.dir }));
+            added.push(
+              await registry.adopt({ id: hit.id.length > 0 ? hit.id : newFactoryId(), name: hit.name, baseDir: hit.dir }),
+            );
           } else if (!existsSync(docPath(known.baseDir))) {
             const moved = await registry.relocate(hit.id, hit.dir);
             if (moved !== undefined) updated.push(moved);
@@ -1391,11 +1674,9 @@ const server = createServer(async (req, res) => {
         typeof wanted.name === 'string' && wanted.name.trim().length > 0
           ? wanted.name.trim()
           : `Factory ${registry.list().length + 1}`;
-      const asked =
-        typeof wanted.baseDir === 'string' && wanted.baseDir.trim().length > 0
-          ? wanted.baseDir.trim()
-          : ownBaseDir(id);
-      const ref = await registry.put({ id, name, baseDir: await pickBaseDir(asked, id) });
+      // A folder asked for is the "Create a factory here" in the Open picker;
+      // none is `+`, which lands in the default folder.
+      const ref = await registry.put({ id, name, baseDir: targetDir(wanted.baseDir, id) });
       const host = await open(ref);
       send('factories', registry.list());
       return json(res, 201, host.doc());
@@ -1405,29 +1686,24 @@ const server = createServer(async (req, res) => {
       const body = await readBody(req);
       if (!isObject(body)) return json(res, 400, { error: 'expected a factory document' });
 
-      // The document's own id is kept when nothing open is using it, so
-      // re-importing the same file restores that factory rather than piling up
-      // copies of it, including one that was closed since.
-      const own = typeof body.id === 'string' ? body.id : undefined;
-      const id = own !== undefined && idFree(own) ? own : newFactoryId();
+      // Where it goes is the operator's pick in the Open picker, `?dir=`, or the
+      // default folder when none was given. A `baseDir` inside the file is a path on
+      // whichever machine wrote it and is ignored. A folder that already holds a
+      // factory is refused: open that one, or pick another.
+      const own = typeof body.id === 'string' && body.id.length > 0 ? body.id : undefined;
+      const provisional = newFactoryId();
+      const baseDir = targetDir(query.get('dir'), provisional);
+      // The file's id is kept unless another folder's factory already has it, which
+      // is what importing an export of a factory still on this machine is: a copy.
+      const id = own !== undefined && !idTaken(own, baseDir) ? own : provisional;
       const name =
         typeof body.name === 'string' && body.name.trim().length > 0 ? body.name.trim() : 'Imported factory';
-
-      // `baseDir` travels in the file, but it is a path on whichever machine wrote
-      // it. So it is a hint: used when the directory is actually there, and
-      // replaced by the default when it is not.
-      const hinted =
-        typeof body.baseDir === 'string' && body.baseDir.trim().length > 0
-          ? path.resolve(body.baseDir.trim())
-          : undefined;
-      const usable = hinted !== undefined && existsSync(hinted);
-      const baseDir = await pickBaseDir(usable ? hinted! : ownBaseDir(id), id);
 
       // Parsed before anything is registered or written, so an import that is
       // refused leaves no tab and no directory behind it.
       let imported: Factory;
       try {
-        imported = parse({ ...body, id, name, baseDir }, { id, name, baseDir });
+        imported = parse(withoutTrustDeploy({ ...body, id, name, baseDir }), { id, name, baseDir });
       } catch (err) {
         if (err instanceof DocumentError) return json(res, 422, { error: err.message });
         throw err;
@@ -1438,12 +1714,8 @@ const server = createServer(async (req, res) => {
       send('factories', registry.list());
       return json(res, 201, {
         factory: host.doc(),
-        ...(hinted !== undefined && !usable
-          ? {
-              note:
-                `The folder that file names is not on this machine, so the factory ` +
-                `was placed in ${baseDir}`,
-            }
+        ...(own !== undefined && own !== id
+          ? { note: 'A factory with the same id is already on this machine, so this copy got a new id. They are now two factories.' }
           : {}),
       });
     }
@@ -1520,16 +1792,14 @@ const server = createServer(async (req, res) => {
       }
 
       /*
-       * The document's id is kept, unless another open tab is already using it -
-       * two directories holding copies of the same document, which is the same
-       * collision Import resolves the same way. A known entry for this directory
-       * wins outright: whether it is closed, or open but without a host because the
-       * tab failed to open, its id is reused to bring that factory back rather than
-       * left behind as a second entry pointing here.
+       * The id, by the one rule in `identify`: this folder's registry row if it has
+       * one, then the document's id, either kept only if no other folder's factory
+       * has it. A document with no id - one an agent wrote - gets one minted here,
+       * and `save` below writes it back.
        */
-      const own = typeof raw.id === 'string' ? raw.id : undefined;
-      const id =
-        already?.id ?? (own !== undefined && idFree(own) ? own : newFactoryId());
+      const own = typeof raw.id === 'string' && raw.id.length > 0 ? raw.id : undefined;
+      const id = identify(baseDir, own);
+      const copied = own !== undefined && own !== id && idTaken(own, baseDir);
       const name =
         typeof raw.name === 'string' && raw.name.trim().length > 0 ? raw.name.trim() : 'Factory';
 
@@ -1550,10 +1820,10 @@ const server = createServer(async (req, res) => {
       send('factories', registry.list());
       return json(res, 201, {
         factory: host.doc(),
-        ...(own !== undefined && own !== id
+        ...(copied
           ? {
               note:
-                `Another open factory already had the id in that document, so this one ` +
+                `This folder is a copy of another factory on this machine, so it ` +
                 `opened with a new id. They are now two factories.`,
             }
           : {}),
@@ -1571,6 +1841,173 @@ const server = createServer(async (req, res) => {
       // mutation here.
       send('factories', registry.list());
       return json(res, 200, registry.list());
+    }
+
+    /* -------------------------------------------------------------- flocks */
+
+    /*
+     * Connections to Kiro Flocks, for remote loops. Every answer is a
+     * `FlockConnectionView`: no token, no refresh token, no password ever
+     * crosses here. The only secret-bearing requests are the add and sign-in
+     * POSTs, which the gate above already requires the per-run token for.
+     */
+    if (url === '/api/flocks' && method === 'GET') return json(res, 200, await connections.list());
+
+    if (url === '/api/flocks' && method === 'POST') {
+      const body = await readBody(req);
+      if (!isObject(body)) return json(res, 400, { error: 'expected an object' });
+      try {
+        const view = await connections.add({
+          apiUrl: typeof body.apiUrl === 'string' ? body.apiUrl : '',
+          username: typeof body.username === 'string' ? body.username : '',
+          password: typeof body.password === 'string' ? body.password : '',
+          ...(typeof body.mfaCode === 'string' ? { mfaCode: body.mfaCode } : {}),
+          ...(typeof body.name === 'string' ? { name: body.name } : {}),
+          ...(typeof body.userPoolId === 'string' ? { userPoolId: body.userPoolId } : {}),
+          ...(typeof body.clientId === 'string' ? { clientId: body.clientId } : {}),
+        });
+        // The capability probe, once, so the dialog can say "needs flock update"
+        // before anyone draws a loop on it. A probe failure is recorded, not fatal.
+        try {
+          const c = (await connections.get(view.id))!;
+          const client = new FlockClient(c.apiUrl, await connections.session(c.id));
+          await connections.setQueueRoutes(c.id, await client.hasQueueRoutes());
+        } catch {
+          /* shown as unknown */
+        }
+        return json(res, 201, (await connections.list()).find((c) => c.id === view.id) ?? view);
+      } catch (err) {
+        if (err instanceof ConnectionError) return json(res, err.status, { error: err.message });
+        throw err;
+      }
+    }
+
+    const flock = /^\/api\/flocks\/([^/]+)(\/.*)?$/.exec(url);
+    if (flock) {
+      const cid = decodeURIComponent(flock[1]!);
+      const sub = flock[2] ?? '';
+      const connection = await connections.get(cid);
+      if (connection === undefined) return json(res, 404, { error: 'no such connection' });
+      const clientFor = async (): Promise<FlockClient> => new FlockClient(connection.apiUrl, await connections.session(cid));
+
+      try {
+        if (sub === '' && method === 'DELETE') {
+          // Refused while any open factory has a loop on it: removing the
+          // credential would strand those clusters with no way to stop them.
+          const users = [...hosts.values()].flatMap((h) => h.remoteLoopsOn(cid).map((l) => `${h.doc().name} / ${l.name}`));
+          if (users.length > 0) {
+            return json(res, 409, { error: `used by ${users.join(', ')} - remove or repoint those loops first` });
+          }
+          await connections.remove(cid);
+          return json(res, 200, await connections.list());
+        }
+        if (sub === '' && method === 'PATCH') {
+          const body = await readBody(req);
+          const name = isObject(body) && typeof body.name === 'string' ? body.name : '';
+          return json(res, 200, await connections.rename(cid, name));
+        }
+        if (sub === '/signin' && method === 'POST') {
+          const body = await readBody(req);
+          if (!isObject(body) || typeof body.password !== 'string') return json(res, 400, { error: 'password required' });
+          const view = await connections.signIn(cid, {
+            password: body.password,
+            ...(typeof body.mfaCode === 'string' ? { mfaCode: body.mfaCode } : {}),
+          });
+          // A sign-in is also what resumes syncing: re-attach every remote loop
+          // on this connection that is waiting on it.
+          for (const h of hosts.values()) {
+            for (const l of h.remoteLoopsOn(cid)) {
+              const remote = h.remoteOf(l.loopId);
+              if (remote !== undefined) void remote.resumeSync().catch(() => undefined);
+            }
+          }
+          return json(res, 200, view);
+        }
+        if (sub === '/signout' && method === 'POST') return json(res, 200, await connections.signOut(cid));
+        if (sub === '/models' && method === 'GET') return json(res, 200, await (await clientFor()).listModels());
+        if (sub === '/limits' && method === 'GET') return json(res, 200, await (await clientFor()).limits());
+        if (sub === '/probe' && method === 'POST') {
+          const ok = await (await clientFor()).hasQueueRoutes();
+          await connections.setQueueRoutes(cid, ok);
+          return json(res, 200, { queueRoutes: ok });
+        }
+
+        /*
+         * Every cluster on the flock, annotated with who owns it (plan 9.4):
+         * this factory, another open factory, a Kiro Factory cluster nobody is
+         * driving (an orphan), or not ours at all. Ownership is the `kf-` prefix
+         * plus this program's marker in the direction - both, so a user's own
+         * cluster that happens to be called `kf-something` is still "not ours".
+         */
+        if (sub === '/clusters' && method === 'GET') {
+          const client = await clientFor();
+          const list = await client.listClusters();
+          const driven = new Map<string, { factory: string; loop: string }>();
+          for (const h of hosts.values()) {
+            for (const l of h.doc().loops) {
+              if (l.remote?.connection !== cid) continue;
+              const r = h.remoteOf(l.id);
+              if (r !== undefined) driven.set(r.clusterId, { factory: h.doc().name, loop: l.name });
+            }
+          }
+          const detachedList = (await detached.list()).filter((d) => d.connection === cid);
+          const out = [];
+          for (const c of list) {
+            let owner: 'this-factory' | 'other-factory' | 'kiro-factory-orphan' | 'not-ours' = 'not-ours';
+            let marker: { factoryId: string; loopId: string; connectionId: string } | null = null;
+            if (c.id.startsWith('kf-')) {
+              try {
+                marker = readMarker(await client.getDirection(c.id));
+              } catch {
+                marker = null;
+              }
+            }
+            const drive = driven.get(c.id);
+            if (marker !== null) owner = drive !== undefined ? 'other-factory' : 'kiro-factory-orphan';
+            const detachedRecord = detachedList.find((d) => d.clusterId === c.id);
+            out.push({
+              ...c,
+              owner,
+              ...(drive !== undefined ? { drivenBy: drive } : {}),
+              ...(detachedRecord !== undefined ? { detached: { factoryName: detachedRecord.factoryName, baseDir: detachedRecord.baseDir, detachedAt: detachedRecord.detachedAt } } : {}),
+              uiUrl: `${connection.apiUrl}/?cluster=${encodeURIComponent(c.id)}`,
+            });
+          }
+          return json(res, 200, { clusters: out });
+        }
+
+        // Orphan handling, confirm-gated in the UI. Only clusters that carry
+        // this program's marker may be stopped or removed from here.
+        const orphan = /^\/clusters\/([^/]+)$/.exec(sub);
+        const orphanStop = /^\/clusters\/([^/]+)\/stop$/.exec(sub);
+        if ((orphan && method === 'DELETE') || (orphanStop && method === 'POST')) {
+          const clusterId = decodeURIComponent((orphan ?? orphanStop)![1]!);
+          if (!/^kf-[0-9a-f]{8}$/.test(clusterId)) return json(res, 403, { error: 'not a Kiro Factory cluster' });
+          const client = await clientFor();
+          if (readMarker(await client.getDirection(clusterId)) === null) return json(res, 403, { error: 'not a Kiro Factory cluster' });
+          if ([...hosts.values()].some((h) => [...h.doc().loops].some((l) => h.remoteOf(l.id)?.clusterId === clusterId))) {
+            return json(res, 409, { error: 'an open factory is driving this cluster - use its own Stop or Delete' });
+          }
+          await client.stop(clusterId).catch((e: unknown) => {
+            if (!(e instanceof FlockApiError && e.status === 409)) throw e;
+          });
+          if (orphan && method === 'DELETE') {
+            const end = Date.now() + 180_000;
+            while (Date.now() < end && (await client.getStatus(clusterId)).clusterState !== 'stopped') {
+              await new Promise((r) => setTimeout(r, 2000));
+            }
+            await client.deleteCluster(clusterId);
+            await detached.remove(cid, clusterId);
+          }
+          return json(res, 200, { ok: true });
+        }
+      } catch (err) {
+        if (err instanceof ConnectionError) return json(res, err.status, { error: err.message });
+        if (err instanceof FlockApiError) return json(res, err.status === 0 ? 502 : err.status, { error: err.message });
+        if (err instanceof SignedOutError) return json(res, 401, { error: 'signed out - sign in to this flock first' });
+        throw err;
+      }
+      return json(res, 404, { error: 'not found' });
     }
 
     /* --------------------------------------------------------- one factory */
@@ -1597,19 +2034,86 @@ const server = createServer(async (req, res) => {
         }
       }
 
+      /*
+       * Read this factory's design again from where it came from.
+       *
+       * For a factory taken out of the library, that is its entry: take-out mints a
+       * copy, and a copy does not follow the entry it copied. For every other
+       * factory it is its own document file on disk. Either way an agent editing the
+       * file afterwards is editing something no open tab shows. This brings the
+       * design in the file onto this canvas: loops, wires and parameters are
+       * replaced, identity and directory are not, so it is the same factory, in the
+       * same tab, with the new design.
+       *
+       * Through `host.replace`, which is what the canvas saves through, so the same
+       * rules hold - and refused outright while anything runs, because the loops
+       * about to be rewritten are the ones holding the prompts and folders in use.
+       * `replace` would allow most edits under a running loop; a whole design landing
+       * at once is not most edits.
+       *
+       * Loop positions come from the entry, which keeps geometry on purpose, so a
+       * canvas rearranged by hand goes back to how the entry lays it out. That is what
+       * "the latest version" means.
+       */
+      if (rest === '/reload' && method === 'POST') {
+        const current = host.doc();
+        if (host.anyRunning()) {
+          return json(res, 409, { error: 'stop the loops first. Reloading replaces the design a turn in flight is running' });
+        }
+        /*
+         * Two places a design can be newer than the canvas, and which one applies is
+         * decided by `source`. A factory from the library reads its entry again. Any
+         * other factory reads its own document file again: the server loaded it once
+         * when the tab opened and has held it since, so an agent editing
+         * `.kirofactory/factory.json` underneath is editing something nobody shows -
+         * and the next canvas save would write the held copy back over it. Reading
+         * the file through `load` gives it the same parse, and the same refusal of a
+         * broken file, that opening the tab would.
+         */
+        let design: { loops: unknown; wires: unknown; parameters?: unknown };
+        if (current.source !== undefined) {
+          const entry = await library.factoryBySlug(current.source.library);
+          if (!entry) {
+            return json(res, 404, { error: `"${current.source.library}" is no longer in the library` });
+          }
+          design = entry;
+        } else {
+          try {
+            design = await load(current.baseDir, { id: current.id, name: current.name, baseDir: current.baseDir });
+          } catch (err) {
+            if (err instanceof DocumentError) return json(res, 400, { error: err.message });
+            throw err;
+          }
+        }
+        try {
+          // A design read from the library or from a file edited outside the app
+          // does not get to turn deploys on; the operator ticks that here.
+          const doc = await host.replace(withoutTrustDeploy({
+            loops: design.loops,
+            wires: design.wires,
+            ...(design.parameters !== undefined ? { parameters: design.parameters } : {}),
+          }));
+          return json(res, 200, doc);
+        } catch (err) {
+          if (err instanceof DocumentError) return json(res, 400, { error: err.message });
+          if (err instanceof ConflictError) return json(res, 409, { error: err.message });
+          throw err;
+        }
+      }
+
       if (rest === '' && method === 'PATCH') {
         const body = await readBody(req);
         if (!isObject(body)) return json(res, 400, { error: 'expected an object' });
+        // A factory is its folder, so there is no moving one in place. Use a new
+        // folder through Open, or Export and Import, or the library.
+        if ('baseDir' in body) {
+          return json(res, 400, {
+            error: 'A factory cannot be moved to another folder. Export it and Import it there, or take it out of the library there.',
+          });
+        }
         let doc = host.doc();
         if (typeof body.name === 'string' && body.name.trim().length > 0) {
           doc = await host.rename(body.name.trim());
-        }
-        if (typeof body.baseDir === 'string' && body.baseDir.trim().length > 0) {
-          try {
-            doc = await host.setBaseDir(body.baseDir.trim());
-          } catch (err) {
-            return json(res, 409, { error: err instanceof Error ? err.message : String(err) });
-          }
         }
         await registry.put(host.ref());
         send('factories', registry.list());
@@ -1634,6 +2138,33 @@ const server = createServer(async (req, res) => {
          */
         const wipe = query.get('files') === 'yes';
         const baseDir = host.doc().baseDir;
+        /*
+         * Remote clusters: the dialog has already asked, per live cluster, and
+         * sends the answer as `?remote=<loopId>:<keep|stop|delete>,...`. Keep is
+         * the default and means detach: the cluster runs on and is recorded in
+         * the user-level detached list so the orphan list shows it. A plain
+         * close (no `files`) always keeps; `dispose` never stops a cluster.
+         */
+        const answers = new Map<string, 'keep' | 'stop' | 'delete'>();
+        for (const part of (query.get('remote') ?? '').split(',').filter(Boolean)) {
+          const [loopId, choice] = part.split(':');
+          if (loopId && (choice === 'keep' || choice === 'stop' || choice === 'delete')) answers.set(decodeURIComponent(loopId), choice);
+        }
+        for (const live of host.liveRemotes()) {
+          const choice = wipe ? (answers.get(live.loopId) ?? 'keep') : 'keep';
+          if (choice === 'keep') {
+            await detached.add({
+              connection: live.connection, clusterId: live.clusterId, loopId: live.loopId,
+              factoryName: host.doc().name, baseDir, detachedAt: new Date().toISOString(),
+            });
+            continue;
+          }
+          try {
+            await host.destroyRemote(live.loopId, choice === 'delete');
+          } catch (err) {
+            process.stderr.write(`  [${host.doc().name}] could not stop ${live.clusterId}: ${err instanceof Error ? err.message : String(err)}\n`);
+          }
+        }
         await host.dispose();
         hosts.delete(id);
         if (wipe) {
@@ -1966,9 +2497,125 @@ const server = createServer(async (req, res) => {
         const body = await readBody(req);
         const text = isObject(body) && typeof body.text === 'string' ? body.text.trim() : '';
         if (text.length === 0) return json(res, 400, { error: 'text required' });
-        if (!host.steerLoop(decodeURIComponent(steer[1]!), text)) {
+        const key = decodeURIComponent(steer[1]!);
+        // A remote node has no chat: the direction is the only channel, and
+        // editing the prompt is how it is steered.
+        if (host.isRemoteKey(key)) return json(res, 409, { error: 'remote loops cannot be steered - edit the prompt instead' });
+        if (!host.steerLoop(key, text)) {
           return json(res, 404, { error: 'no such loop' });
         }
+        return json(res, 200, { ok: true });
+      }
+
+      /*
+       * Remote loop proxies. The browser never talks to a flock: these fetch
+       * on its behalf with the connection's token, through the shared stream
+       * cache so several tabs cost one SSM command, and with every parameter
+       * validated before it is forwarded.
+       *
+       *   GET /loops/:l/remote/stream?node=N&kind=acp|console[&session=ID]
+       *   GET /loops/:l/remote/sessions?node=N
+       *   GET /loops/:l/remote/files
+       *   GET /loops/:l/remote/file?path=
+       *   GET /loops/:l/remote/info
+       */
+      const remoteRoute = /^\/loops\/([^/]+)\/remote\/(stream|sessions|files|file|info)$/.exec(rest);
+      if (remoteRoute && method === 'GET') {
+        const loopId = decodeURIComponent(remoteRoute[1]!);
+        const what = remoteRoute[2];
+        try {
+          const target = await host.remoteClient(loopId);
+          if (target === undefined) return json(res, 404, { error: 'not a remote loop' });
+          const { client, clusterId, connectionId } = target;
+          const node = Number.parseInt(query.get('node') ?? '0', 10);
+          if (!Number.isInteger(node) || node < 0 || node > 999) return json(res, 400, { error: 'node must be 0..999' });
+
+          if (what === 'info') {
+            const remote = host.remoteOf(loopId);
+            return json(res, 200, {
+              clusterId,
+              connection: connectionId,
+              uiUrl: remote?.uiUrl ?? `${(await connections.get(connectionId))?.apiUrl ?? ''}/?cluster=${encodeURIComponent(clusterId)}`,
+              nodeUrl: remote?.nodeUrl(node),
+              state: remote?.state ?? 'unknown',
+            });
+          }
+          if (what === 'stream') {
+            const kind = query.get('kind') === 'console' ? 'console' : 'acp';
+            const session = query.get('session') ?? undefined;
+            if (session !== undefined && !SESSION_ID_RE.test(session)) return json(res, 400, { error: 'bad session id' });
+            return json(res, 200, await streamProxy.stream(connectionId, client, clusterId, node, kind, session));
+          }
+          if (what === 'sessions') {
+            return json(res, 200, await streamProxy.list(connectionId, client, clusterId, node));
+          }
+          if (what === 'files') {
+            const files = await client.queueListAll(clusterId, '');
+            return json(res, 200, {
+              dir: `environment/${clusterId}/`,
+              files: files.map((f) => ({ path: f.key, size: f.size, mtime: f.lastModified })),
+            });
+          }
+          // what === 'file'
+          const asked = query.get('path') ?? '';
+          // Validated here as `scopedKey` does on the flock: relative, no `..`,
+          // no control characters. Refused before anything is sent.
+          if (
+            asked.length === 0 || asked.length > 512 || asked.startsWith('/') || asked.includes('\\') ||
+            asked.includes('//') || /[\u0000-\u001f\u007f]/.test(asked) || asked.split('/').some((s) => s === '..')
+          ) {
+            return json(res, 403, { error: 'bad path' });
+          }
+          const content = await client.readFile(`environment/${clusterId}/${asked}`);
+          return json(res, 200, { path: asked, content });
+        } catch (err) {
+          if (err instanceof SignedOutError) return json(res, 401, { error: 'signed out - sign in to this flock first' });
+          if (err instanceof FlockApiError) return json(res, err.status === 0 ? 502 : err.status, { error: err.message });
+          return json(res, 409, { error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+
+      /*
+       * What a Delete on this factory, or on one of its loops, would do to the
+       * remote clusters - for the dialogs, which ask before anything runs.
+       */
+      if (rest === '/remotes' && method === 'GET') {
+        return json(res, 200, { live: host.liveRemotes() });
+      }
+
+      /*
+       * Remove a remote loop's cluster from its flock (the delete-loop dialog's
+       * confirmed path). Stops it if live. `?files=yes` also deletes its S3
+       * folder, which is irreversible and has its own confirmation in the UI.
+       * The loop itself is removed from the document by the usual PUT after.
+       */
+      const remoteDestroy = /^\/loops\/([^/]+)\/remote$/.exec(rest);
+      if (remoteDestroy && method === 'DELETE') {
+        try {
+          await host.destroyRemote(decodeURIComponent(remoteDestroy[1]!), query.get('files') === 'yes');
+          return json(res, 200, { ok: true });
+        } catch (err) {
+          if (err instanceof FlockApiError) return json(res, err.status === 0 ? 502 : err.status, { error: err.message });
+          return json(res, 409, { error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+
+      /*
+       * Detach: stop watching a remote loop's cluster and record it as left
+       * running, so it appears in the orphan list. Nothing on the flock changes.
+       */
+      const remoteDetach = /^\/loops\/([^/]+)\/remote\/detach$/.exec(rest);
+      if (remoteDetach && method === 'POST') {
+        const loopId = decodeURIComponent(remoteDetach[1]!);
+        const remote = host.remoteOf(loopId);
+        const loop = host.doc().loops.find((l) => l.id === loopId);
+        if (remote !== undefined && loop?.remote !== undefined) {
+          await detached.add({
+            connection: loop.remote.connection, clusterId: remote.clusterId, loopId, factoryName: host.doc().name,
+            baseDir: host.doc().baseDir, detachedAt: new Date().toISOString(),
+          });
+        }
+        host.detachRemote(loopId);
         return json(res, 200, { ok: true });
       }
 
@@ -1977,12 +2624,19 @@ const server = createServer(async (req, res) => {
         return json(res, 200, host.output(decodeURIComponent(outputFor[1]!)));
       }
 
+      const usageFor = /^\/usage\/([^/]+)$/.exec(rest);
+      if (usageFor && method === 'GET') {
+        return json(res, 200, await host.usageFor(decodeURIComponent(usageFor[1]!)));
+      }
+      if (rest === '/usage-history' && method === 'GET') {
+        return json(res, 200, await host.usageHistory());
+      }
       /*
        * The project the loops are building, and one of its files.
        *
        * The same two shapes as the loop endpoints below and deliberately so - the
        * panel renders either from one code path - but rooted at the base directory
-       * and without their DELETE counterparts. See `listProjectFiles`.
+       * and without their DELETE counterparts. See `listProjectFolders`.
        */
       /*
        * All three project-file routes take an optional `?checkout=<runner key>`
@@ -2002,7 +2656,8 @@ const server = createServer(async (req, res) => {
       if (rest === '/files' && method === 'GET') {
         const root = checkoutRoot();
         if (root === null) return json(res, 404, { error: 'that session has no checkout of its own' });
-        return json(res, 200, await listProjectFiles(root));
+        // `?folder=a/&folder=a/b/` - the folders the panel has open.
+        return json(res, 200, await listProjectFolders(root, query.getAll('folder')));
       }
 
       /*
@@ -2033,7 +2688,8 @@ const server = createServer(async (req, res) => {
         }
         await fsp.mkdir(path.dirname(file), { recursive: true });
         await fsp.writeFile(file, bytes);
-        return json(res, 200, await listProjectFiles(root));
+        // The root only: the panel re-reads its open folders itself after a drop.
+        return json(res, 200, await listProjectFolders(root));
       }
 
       if (rest === '/file' && method === 'GET') {
@@ -2217,6 +2873,7 @@ const server = createServer(async (req, res) => {
     if (url.startsWith('/api/')) return json(res, 404, { error: 'no such endpoint' });
     return await serveStatic(url, res);
   } catch (err) {
+    if (err instanceof Refusal) return json(res, err.status, { error: err.message });
     json(res, 500, { error: String(err) });
   }
 });
@@ -2224,6 +2881,7 @@ const server = createServer(async (req, res) => {
 /* ------------------------------------------------------------------ startup */
 
 await registry.read();
+await readConfig();
 
 /*
  * Bring a checkout-local registry forward, once.
@@ -2247,6 +2905,21 @@ if (process.env.REGISTRY === undefined) {
     process.stdout.write(
       `  registry took in ${brought} ${brought === 1 ? 'factory' : 'factories'} from ` +
         `${LEGACY_REGISTRY_FILE}\n`,
+    );
+  }
+}
+
+/*
+ * Line the registry up with the disk: drop rows whose folder no longer holds a
+ * factory, keep one row per folder and one per id. Only rows change, never a
+ * factory folder. See `Registry.reconcile`.
+ */
+{
+  const dropped = await registry.reconcile(docPath, newFactoryId);
+  if (dropped.length > 0) {
+    process.stdout.write(
+      `  registry dropped ${dropped.length} ${dropped.length === 1 ? 'entry' : 'entries'} with no factory left on disk:\n` +
+        dropped.map((d) => `    ${d}\n`).join(''),
     );
   }
 }

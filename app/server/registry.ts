@@ -115,8 +115,76 @@ export class Registry {
     if (was !== undefined) this.refs.splice(at, 1);
     if (inPlace) this.refs.splice(at, 0, next);
     else this.refs.unshift(next);
+    // One entry per folder. A folder is a factory, so any other row claiming the
+    // same directory is a stale record of this one under an older id.
+    this.refs = this.refs.filter((r) => r === next || r.baseDir !== next.baseDir);
     await this.write();
     return next;
+  }
+
+  /** The entry for a folder, open or closed. A folder holds at most one factory. */
+  at(baseDir: string): FactoryRef | undefined {
+    const dir = path.resolve(baseDir);
+    return this.refs.find((r) => r.baseDir === dir);
+  }
+
+  /**
+   * Bring the list in line with what is on disk. Run once at startup.
+   *
+   * Three passes, and none of them touches a factory folder - only rows here:
+   *
+   * 1. Drop rows whose folder holds no factory document. The folder was deleted or
+   *    moved; if it moved, Open or a scan finds it again at its new place.
+   * 2. Keep one row per folder, the first (most recently a tab) winning.
+   * 3. Keep one row per id. A later row with an id already used gets a fresh one,
+   *    which is what a copied folder is: a different factory. Opening that row
+   *    writes the new id into its document.
+   *
+   * Names of closed rows are refreshed from their documents, because the document
+   * is the source of truth and a closed row has nothing newer to say.
+   *
+   * Returns the folders whose rows were dropped, for the startup log.
+   */
+  async reconcile(docOf: (baseDir: string) => string, mint: () => string): Promise<string[]> {
+    const dropped: string[] = [];
+    const dirs = new Set<string>();
+    const ids = new Set<string>();
+    const kept: FactoryRef[] = [];
+    let changed = false;
+    for (const ref of this.refs) {
+      const doc = docOf(ref.baseDir);
+      if (!existsSync(doc)) {
+        dropped.push(ref.baseDir);
+        changed = true;
+        continue;
+      }
+      if (dirs.has(ref.baseDir)) {
+        changed = true;
+        continue;
+      }
+      dirs.add(ref.baseDir);
+      if (ids.has(ref.id)) {
+        ref.id = mint();
+        changed = true;
+      }
+      ids.add(ref.id);
+      if (!ref.open) {
+        try {
+          const raw: unknown = JSON.parse(await fsp.readFile(doc, 'utf8'));
+          const name = isObject(raw) && typeof raw.name === 'string' ? raw.name.trim() : '';
+          if (name.length > 0 && name !== ref.name) {
+            ref.name = name;
+            changed = true;
+          }
+        } catch {
+          // An unreadable document keeps its row: opening it says what is wrong.
+        }
+      }
+      kept.push(ref);
+    }
+    this.refs = kept;
+    if (changed) await this.write();
+    return dropped;
   }
 
   /**
@@ -140,7 +208,8 @@ export class Registry {
    * decision from quietly rewriting the operator's list.
    */
   async adopt(ref: Omit<FactoryRef, 'open'>): Promise<FactoryRef> {
-    const existing = this.refs.find((r) => r.id === ref.id);
+    const existing =
+      this.refs.find((r) => r.id === ref.id) ?? this.refs.find((r) => r.baseDir === path.resolve(ref.baseDir));
     if (existing !== undefined) return existing;
     const next: FactoryRef = {
       id: ref.id,

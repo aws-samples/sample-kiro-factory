@@ -24,6 +24,7 @@
  * still there, and work at any zoom.
  */
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { fmtCredits } from './costFormat.ts';
 import { Icon } from './Icon.tsx';
 import {
   DEFAULT_VIEW,
@@ -36,6 +37,7 @@ import {
   clampZoom,
   frame,
   inAnchor,
+  isBackward,
   junction,
   outAnchor,
   stackDepth,
@@ -53,6 +55,7 @@ import {
   intervalLabel,
   liveMembers,
   memberCount,
+  memberKeys,
   type Factory,
   type Loop,
   type LoopStatus,
@@ -697,7 +700,26 @@ export function Canvas({
     >
       <svg className="wires">
         <g transform={viewTransform(view)}>
-        {groupWires(factory.wires).map((group) => {
+        {groupWires(factory.wires).map((group, _gi, groups) => {
+          /*
+           * Backward wires that leave the same port, or arrive at the same one, are
+           * each given a rank so the geometry can step them apart - see `wirePath`.
+           * Counted over every wire on the canvas, not this group, because a topic
+           * fan-out is drawn as separate singles and they are exactly the wires that
+           * would otherwise lie on top of each other.
+           */
+          const backward = groups
+            .flatMap((g) => (g.kind === 'single' ? [g.wire] : g.wires))
+            .filter((w) => {
+              const f = byId.get(w.from);
+              const t = byId.get(w.to);
+              return f !== undefined && t !== undefined && isBackward(outAnchor(f), inAnchor(t));
+            });
+          const rankOf = (w: Wire): number => {
+            const i = backward.findIndex((x) => x.id === w.id);
+            if (i < 0) return 0;
+            return backward.slice(0, i).filter((x) => x.from === w.from || x.to === w.to).length;
+          };
           /*
            * Selecting a wire lights up the whole fan-out it belongs to.
            *
@@ -717,7 +739,8 @@ export function Canvas({
             if (!from || !to) return null;
             const a = outAnchor(from);
             const b = inAnchor(to);
-            const d = wirePath(a, b);
+            const rank = rankOf(w);
+            const d = wirePath(a, b, rank);
             const pending = queues[w.id] ?? 0;
             return (
               <g
@@ -747,7 +770,7 @@ export function Canvas({
                   }}
                 />
                 <Count
-                  at={wireMidpoint(a, b)}
+                  at={wireMidpoint(a, b, rank)}
                   pending={pending}
                   tip={tipFor(w.mode, pending, [nameOf(w.to)])}
                   onSelect={() => onSelect({ kind: 'wire', id: w.id })}
@@ -777,7 +800,7 @@ export function Canvas({
                 const to = byId.get(w.to);
                 if (!to) return null;
                 const end = inAnchor(to);
-                const d = wirePath(j, end);
+                const d = wirePath(j, end, rankOf(w));
                 return (
                   <g key={w.id} className={`branch${isSelected(w) ? ' selected' : ''}`}>
                     <path className="wire-line" d={d} />
@@ -842,6 +865,10 @@ export function Canvas({
         // Paused is live, so the button stays Stop: the loop is waiting for an item
         // and Start would be offering to do something it is already doing.
         const live = state !== 'stopped';
+        // Except on a remote card, where a pause is the operator's (or the
+        // flock's autopause) and Start is how it ends: see the button below.
+        const remotePaused = loop.remote !== undefined && state === 'paused';
+        const showStart = !live || remotePaused;
         /*
          * Which kind of pause this is, for the two beacons that report one each.
          *
@@ -860,10 +887,23 @@ export function Canvas({
         const total = memberCount(loop);
         const running_members = liveMembers(loop, status);
         const flock = loop.cluster?.comms === 'flock';
+        // A remote loop's members all carry the same `remote` block; the first is enough.
+        const remoteStatus = loop.remote ? memberKeys(loop).map((k) => status.get(k)?.remote).find((r) => r !== undefined) : undefined;
+        const remoteWarn = loop.remote
+          ? remoteStatus === undefined
+            ? undefined
+            : remoteStatus.sync === 'signed-out'
+              ? 'Signed out of the flock: not syncing. The cluster is still running.'
+              : remoteStatus.sync === 'unreachable'
+                ? 'Flock not reachable, retrying.'
+                : remoteStatus.problem
+          : undefined;
         return (
           <div
             key={loop.id}
-            className={`loop${running ? ' running' : ''}${state === 'paused' ? ' paused' : ''}${state === 'stopping' ? ' stopping' : ''}${loop.disabled ? ' disabled' : ''}${selected?.kind === 'loop' && selected.id === loop.id ? ' selected' : ''}${loop.cluster ? ' cluster' : ''}${flock ? ' flock' : ''}`}
+            // A remote card also names its algorithm, and the stylesheet colours
+            // the whole card by it in the flock's own palette - see `.loop.remote`.
+            className={`loop${running ? ' running' : ''}${state === 'paused' ? ' paused' : ''}${state === 'stopping' ? ' stopping' : ''}${loop.disabled ? ' disabled' : ''}${selected?.kind === 'loop' && selected.id === loop.id ? ' selected' : ''}${loop.cluster ? ' cluster' : ''}${flock ? ' flock' : ''}${loop.remote ? ` remote algo-${loop.remote.algorithm ?? 'amorphous'}` : ''}`}
             // Min rather than fixed height: a chip row that wraps grows the box
             // instead of being clipped by it. The wire ports stay pinned to the
             // standard height's midline, which is where geometry.ts attaches the
@@ -937,11 +977,22 @@ export function Canvas({
             */}
             {flock && (
               <a
-                className="flock-badge"
-                href={FLOCK_URL}
+                className={`flock-badge${loop.remote ? ' remote' : ''}${remoteWarn ? ' warn' : ''}`}
+                /*
+                  A remote loop's badge goes to the cluster itself, on the flock's
+                  own dashboard, rather than to the project page: the thing it names
+                  is not an idea elsewhere but a running cluster you can look at.
+                  Until the first status frame arrives there is no URL yet, and the
+                  badge is a label.
+                */
+                href={loop.remote ? remoteStatus?.uiUrl : FLOCK_URL}
                 target="_blank"
                 rel="noreferrer"
-                title={'Kiro Flock local: amorphous computing cluster\n\nOpens the project on GitHub.'}
+                title={
+                  loop.remote
+                    ? `Kiro Flock cluster on ${remoteStatus?.connection ?? 'a flock'}${remoteStatus ? ` (${remoteStatus.clusterId})` : ''}.${remoteWarn ? `\n\n${remoteWarn}` : ''}\n\nOpens its dashboard in a new tab.`
+                    : 'Kiro Flock local: amorphous computing cluster\n\nOpens the project on GitHub.'
+                }
                 // The card's own press selects the loop and arms a drag. Stopped
                 // here, the same way every other control on a card stops it: this
                 // is a link, and a click on it is going somewhere rather than
@@ -955,7 +1006,8 @@ export function Canvas({
               >
                 <span className="flock-kiro">Kiro</span>
                 <span className="flock-flock">flock</span>
-                <span className="flock-local">local</span>
+                <span className="flock-local">{loop.remote ? 'remote' : 'local'}</span>
+                {remoteWarn && <span className="flock-warn" aria-label={remoteWarn}>!</span>}
               </a>
             )}
             {/*
@@ -1129,6 +1181,21 @@ export function Canvas({
                   </span>
                 )}
                 {/*
+                  The one setting that reaches outside the operator's machine: the
+                  cluster may create resources in the flock's account. On the card,
+                  in the halt colour, so it is seen before Start rather than found in
+                  a menu afterwards (PCSR F22).
+                */}
+                {loop.remote?.trustDeploy === true && (
+                  <span
+                    className="mark mark-deploy"
+                    title="Trust deploy is on: the nodes may run cdk deploy into the flock's account, within the flock's deploy boundary. Turn it off in Tools."
+                  >
+                    <Icon name="hero-exclamation-triangle" />
+                    trust deploy
+                  </span>
+                )}
+                {/*
                   Each session works in its own checkout. On the card because two
                   identically configured loops would otherwise be indistinguishable
                   here, and this is the more expensive one - in disk, in first-start
@@ -1247,6 +1314,7 @@ export function Canvas({
                 )}
               </div>
             )}
+            <div className="loop-bottom">
             <div className="loop-foot">
               {/*
                 Start is disabled on a parked loop rather than hidden: the button
@@ -1256,15 +1324,32 @@ export function Canvas({
                 way to stop it would be the one genuinely unhelpful reading of
                 "disabled".
               */}
+              {/*
+                A remote card speaks the flock's two verbs instead. Its Stop is
+                **Pause**: the nodes stop taking turns, the tasks stay up (and
+                bill), and Start brings them back in seconds as a resume. The
+                bolt beside it is the stop. So a paused remote cluster shows
+                Start, where a paused local loop (waiting for work) keeps Stop:
+                the local pause is the loop's own and ends by itself, the remote
+                one is the operator's and ends when they say.
+              */}
               <button
-                className={`${live ? 'stop' : 'start'} with-icon`}
-                disabled={!live && loop.disabled}
+                className={`${showStart ? 'start' : 'stop'} with-icon`}
+                disabled={showStart && !remotePaused && loop.disabled}
                 onPointerDown={(e) => e.stopPropagation()}
-                onClick={() => (live ? onStop(loop.id) : onStart(loop.id))}
-                title={!live && loop.disabled ? 'This loop is disabled. Enable it to start it.' : undefined}
+                onClick={() => (showStart ? onStart(loop.id) : onStop(loop.id))}
+                title={
+                  showStart && !remotePaused && loop.disabled
+                    ? 'This loop is disabled. Enable it to start it.'
+                    : remotePaused
+                      ? 'Resume the paused cluster. The nodes pick up on their next poll.'
+                      : loop.remote !== undefined && live
+                        ? 'Pause the cluster: nodes stop taking turns and spend no credits. The tasks keep running and billing; the bolt is the stop.'
+                        : undefined
+                }
               >
-                <Icon name={live ? 'hero-stop' : 'hero-play'} />
-                {live ? 'Stop' : 'Start'}
+                <Icon name={showStart ? 'hero-play' : loop.remote !== undefined ? 'hero-pause' : 'hero-stop'} />
+                {showStart ? 'Start' : loop.remote !== undefined ? 'Pause' : 'Stop'}
               </button>
               {/*
                 Force stop, for this component only. The toolbar's bolt with a
@@ -1293,16 +1378,23 @@ export function Canvas({
                 onClick={() => onForceStop(loop.id)}
                 title={
                   live
-                    ? // Says what it does and what it costs, which is the whole
-                      // reason this is not simply a second Stop. The member count is
-                      // in it because sixteen killed turns are sixteen folders that
-                      // could hold half-written work, not one.
-                      `Force stop: kill the turn${total > 1 ? 's' : ''} in flight now. ${
-                        total > 1 ? `All ${total} nodes go together. ` : ''
-                      }A killed agent can leave half-finished work on disk.`
-                    : 'Nothing running to force stop'
+                    ? loop.remote !== undefined
+                      ? // On a remote card this is the stop, and the only one: the
+                        // flock ends the tasks at once, nodes do not finish their
+                        // turn, billing ends. Pause is the button beside it.
+                        `Zap: stop the cluster on the flock now. All ${total} nodes end without finishing their turn; billing stops. The queues and the trace in S3 stay.`
+                      : // Says what it does and what it costs, which is the whole
+                        // reason this is not simply a second Stop. The member count is
+                        // in it because sixteen killed turns are sixteen folders that
+                        // could hold half-written work, not one.
+                        `Force stop: kill the turn${total > 1 ? 's' : ''} in flight now. ${
+                          total > 1 ? `All ${total} nodes go together. ` : ''
+                        }A killed agent can leave half-finished work on disk.`
+                    : loop.remote !== undefined
+                      ? 'Nothing running to zap'
+                      : 'Nothing running to force stop'
                 }
-                aria-label="Force stop"
+                aria-label={loop.remote !== undefined ? 'Zap: stop the cluster' : 'Force stop'}
               >
                 <Icon name="hero-bolt" />
               </button>
@@ -1352,6 +1444,17 @@ export function Canvas({
                   <span className="shutting-down">final iteration, shutting down gracefully</span>
                 )}
               </span>
+            </div>
+            {/*
+              The loop's cost, on a line of its own under Stop and force stop. The
+              count's line also carries the clocks and the shutdown sentence, and a
+              third thing there wrapped into a column of fragments.
+            */}
+            {agg.credits !== undefined && (
+              <span className="cost foot-cost" title="Credits spent by this loop since the server started">
+                {fmtCredits(agg.credits)}
+              </span>
+            )}
             </div>
             {/*
               The input dot is the counterpart of the output dot, so a box reads as

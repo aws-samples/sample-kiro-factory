@@ -502,11 +502,24 @@ export async function addFactory(
     author: keep(input.author, existing?.author),
     tags: input.tags !== undefined && input.tags.length > 0 ? input.tags : (existing?.tags ?? []),
     ...(doc.parameters !== undefined ? { parameters: doc.parameters } : {}),
-    loops: doc.loops,
+    loops: doc.loops.map(withoutConnection),
     wires: doc.wires,
   };
   await write(dir, slug, entry);
   return entry;
+}
+
+/**
+ * A remote loop with its connection blanked, for the library.
+ *
+ * `remote.connection` names an entry in one machine's `flocks.json`, which is as
+ * local as a `baseDir` and is kept out of the repository for the same reason. The
+ * loop stays remote - kind, radius, task size and browser flag are the design -
+ * and whoever drops it on a canvas picks a connection for it there.
+ */
+function withoutConnection(loop: Loop): Loop {
+  if (loop.remote === undefined) return loop;
+  return { ...loop, remote: { ...loop.remote, connection: '' } };
 }
 
 /**

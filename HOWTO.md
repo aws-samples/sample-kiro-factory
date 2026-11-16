@@ -114,6 +114,73 @@ Turning a cluster's size down stops the nodes past the new size rather than leav
 
 The line this draws is worth stating once: **what a component *is* needs it stopped; how it behaves does not.** The convert button and the cluster row above are the first kind. The run mode, the model, the tool and MCP scope and the prompt itself are the second, and a running loop picks all of those up on its next turn.
 
+## Remote flock loops
+
+**`Remote loop` beside `Loop cluster` puts a cluster on the floor that runs on a [Kiro Flock](https://github.com/aws-samples/sample-kiro-flock) you already have, instead of as subprocesses on this machine.** Several of them, and the shapes they make with local loops, are the [dark factory](DARK-FACTORY.md). Same card, same stack, same `n1..nN` strip, same panel. The nodes are Fargate tasks on your flock, the queues are the cluster's own S3 folders, the prompt is the cluster's direction, and the badge reads `Kiro flock remote` and opens that cluster in the flock's dashboard. Nothing is deployed from this machine: the factory holds a sign-in to a flock, drives the cluster through its REST API, and moves items between your wires and its S3. A cluster with `trust deploy` on deploys from the flock, into the flock's account (see the Options menu below).
+
+**It is meant to run overnight and longer, whatever happens here.** Closing the browser, quitting the factory, restarting it or a sleeping laptop never stops a remote cluster. Only three things do: the bolt (the **zap**, which is the flock's stop), Delete, and the `After N hours` run mode if you chose it. Everything else - closing the tab, editing the document, removing the loop, a dead token, a corrupt sidecar - leaves the cluster running and visible in the connections dialog, where it can be stopped later.
+
+**A remote card speaks the flock's two verbs.** Where a local card has Stop, a remote card has **Pause**: the nodes stop taking turns and spend no credits, the tasks stay up and keep billing, and the state chip reads `paused (manual)`. Start on a paused cluster is **Resume**, and the nodes pick up on their next poll, so a pause costs seconds to undo rather than the minute or two an ECS start takes. The bolt beside it is the zap: the flock ends the tasks at once, nodes do not finish their turn, billing ends, and the queues and the `claimed/` trace stay in S3. `Stop all` on the toolbar pauses remote clusters; `Force stop all` zaps them. The `After N hours` deadline still fires on a paused cluster. A restarted factory reconnects to every remote loop it was driving, collects whatever the nodes produced while it was away, wakes an autopaused cluster if work is waiting, and applies an overdue timed stop. It records real timings when you run one (see the Bridge view), so the first run is where to look for how long an ECS start takes on your flock.
+
+### Setting it up
+
+1. **Deploy a flock that has the queue routes.** The factory needs three routes the flock's Lambda did not have before: `env-list`, `env-put` and `env-delete`, scoped to one cluster's folder (`environment/<group>/<id>/`), and a `single` algorithm that takes more than one node. Both are on the flock branch the [`kiro-flock/`](https://github.com/aws-samples/sample-kiro-flock) submodule is pinned to; deploy from there (`cd kiro-flock && ./setup.sh`, or the CDK deploy it wraps). No data migration, no IAM change, no API Gateway change. Until then the connections dialog says `needs flock update` and no remote loop will start.
+2. **Add the connection.** The gear beside `Remote loop` opens the connections dialog. Enter the flock's API URL (the `https://...execute-api...amazonaws.com/prod` the dashboard lives at), your Cognito username, password and the six-digit code from your authenticator app (the flock's user pool requires MFA; the flock dashboard enrolls the authenticator on your first sign-in there). The factory reads the flock's `auth-config.json`, signs in once through the AWS SDK's Cognito client, keeps the refresh token, and never sends the password or code anywhere but Cognito. If the flock did not publish `auth-config.json`, the Advanced section takes the user pool id and client id by hand.
+3. **Draw the loop.** `Remote loop` places a card. With one connection it is used; with none or several the dialog opens to pick one. Write the prompt as for any loop: `@input` and `@output` are rewritten to the cluster's S3 paths, parameters are substituted before every push, and the node count has no local ceiling - the flock's own cap applies and its message is shown verbatim on Start.
+4. **Press Start.** The factory writes the config and the direction, starts the cluster, and the card shows `n1..nN` with a bar above the strip: connection, cluster id, state, cost estimate, inbox and outbox counts, and `Open Kiro Flock`.
+
+The cluster id (`kf-` and eight hex digits) is on the bar from the moment the loop has a connection, before the first Start, because it is derived from the connection, the factory and the loop rather than handed out by the flock. Click it to copy. Every remote loop of a factory runs in the factory's **deployment group** (`everforgeGroup` on the flock), a slug of the factory's name fixed when the document is first written (`Factory 2` becomes `factory-2`; the factory id when the name has no usable characters), stored as `remoteGroup` in the document and kept through renames. The group is what lets the loops of one factory collaborate on the flock: their folders sit side by side under `environment/<group>/`, and a deployer's records go to `environment/<group>/deployed/`, one deployment per factory, as the flock keeps it. A loop's folder on the flock is therefore `environment/<group>/<id>/`, which is the prefix to give the flock's own tools: `env_upload` to put a project where the nodes can read it, `env_download_all` to pull everything the nodes wrote, `coder_attach` to watch the queues and scratch folders from an IDE. Two laptops with the same `factory.json` get two different ids, because the connection id is per machine; that is what keeps a second factory from adopting the first one's running cluster.
+
+### What a remote node has
+
+Remote agents run `kiro-cli` with its default built-in tools plus the flock's `s3` MCP server, and the `puppeteer` MCP server when the loop's browser flag is on. **Nothing from this machine**: no MCP servers from your config, no skills, no steering files, no checkout of the project. The panel hides those controls and says so, and the `@` menu in the prompt offers the flock's vocabulary instead of this machine's:
+
+| Token | Means, on the flock |
+|---|---|
+| `@input`, `@output` | the cluster's `queue/in/` and `queue/out/` folders |
+| `@loop` | this node's scratch folder, `loop/agent-N/` |
+| `@environment` | the cluster's whole folder, `environment/<group>/<id>/`: the queues, every node's scratch, and whatever you uploaded there with the flock's tools. This is where `@project` would be, if a remote node had a project |
+| `@browser` | the headless browser (the flock's `puppeteer` MCP server); naming it turns `browser auto` on |
+| `@deploy` | the flock's `aga-deploy` MCP server, which lets the nodes create AWS resources in the flock's account (see below). Naming it does not turn it on: tick `trust deploy` in Tools as well, or Start refuses |
+| `@<parameter>` | its value, substituted before the direction is pushed |
+
+A prompt that names `@project`, an MCP server, a skill or a steering file cannot start; the reason is listed under the settings and comes back from the server as a 409. To give the nodes a project, upload it into `environment/<group>/<id>/` (the group is the factory's, the id is on the bar) and write `@environment` in the prompt.
+
+The run modes are `Autopause`, `Run forever` and `After N hours`. Autopause is the same `autoPause` field a local loop calls `Wait for work`, under the flock's own name for it: the nodes report idle, after three idle iterations the flock pauses the cluster, and the factory resumes it when an item lands in `in/`. Paused tasks keep billing. `Auto stop` and `After N iterations` are not offered: the flock pauses on idle rather than stopping, and has no single iteration count across nodes. The model comes from the flock's catalog, the interval stops at an hour, and the task size (`small` to `xlarge`) and the flock tools (`browser auto`, `trust deploy`, `iter → reflect`, all off by default; `idle → pause` is the Autopause run mode) are the remote-only settings.
+
+### How the nodes talk: the mode
+
+The first control on the settings row is the flock's coordination algorithm, and the card takes the flock's colour for it so the mode reads from across the canvas.
+
+| Mode | Colour | Nodes | What a node reads |
+|---|---|---|---|
+| `amorphous` (default) | purple | 2 or more | its neighbours on a ring, `radius` each way. The default for a reason: it scales, and the neighbours' log lines are what let nodes split work without being told who takes what |
+| `mesh` | red | 2 or more | every other node. Fine up to a handful; past that every node spends its turn reading |
+| `swarm` | blue | 2 or more | the `K` most recently active nodes. For larger clusters where a mesh is too much and a ring too slow to spread news |
+| `single` | green | 1 or more | nobody. Each node works the direction alone, so `N` nodes are `N` independent runs of it, a fire-and-forget pool. Queue items still work, because the queue hands out the work rather than the neighbours |
+
+`radius` shows for amorphous, `K` for swarm. Single is the one mode that lets the node count go to one; the others floor at two, as a local cluster does, because one node with nobody to read is a loop dressed as several. In the document it is `remote.algorithm` (absent means amorphous) and `remote.swarmK`.
+
+### Both sides stay the same
+
+While the factory is attached to a cluster, the settings and the direction are kept in step with the flock, in both directions. Edit the model, the interval, autopause or the direction on the flock's own dashboard and the card follows within fifteen seconds, the panel showing the new values and the prompt; edit them in the panel and the flock has them at once, the nodes picking them up on their next turn. Node count, mode, radius, `K`, task size and the three tools travel the same way, and the flock applies them on its next start, which the Bridge log says. The rule is latest writer wins: whichever side changed since the two last agreed is the one copied. A factory that reconnects after being away takes what the flock holds, since that is what has been running. A direction edited on the flock comes back as the prompt with `@input`, `@output`, `@loop`, `@environment`, `@browser` and `@deploy` restored from their S3 paths; a parameter's value stays as the value, since a value can occur anywhere in prose, and the Bridge log says so. A direction emptied on the flock is put back rather than taken as an empty prompt.
+
+### Queues and at-least-once
+
+The cluster's prefix carries four queue folders: `queue/in/` (the factory adds items), `queue/out/` (nodes write results), `queue/claimed/in/` (a node moves an item here when it takes it) and `queue/claimed/out/` (the factory moves a result here after writing it to your wires). Nothing in `claimed/` is ever deleted; it is the trace of the run, readable in the file panel. Two nodes may take the same item - that is accepted, and amorphous computing converges. Delivery to your downstream wires is **at least once**: a crash between writing a result locally and moving it on the flock can deliver one item twice, with the same file name, so consumers should treat the item `id` as the key. Items with an `artifact` are inlined up to 256 KB; larger ones are parked in `rejected/` with a line in the Bridge log.
+
+### Signing in, and staying signed in
+
+The refresh token lasts 7 days from sign-in and is not extended by use. After that the card shows **Sign in to resume syncing. The cluster is still running.**, the state chip shows the last seen state, and output accumulates on the flock until you sign in again from the connections dialog. The password is used for that one sign-in and never stored: local loops run with shell access as you, and a stored password would have let any of them become you on the flock. A loop that must sync unattended for longer than a week therefore needs someone to sign in once a week; the cluster itself is never affected.
+
+### Cost
+
+Fargate tasks bill while a cluster is `running` or `paused`. **Paused is not free**, whether you pressed Pause or autopause did: a pause saves model credits, not task time. Only the zap ends the tasks. The card shows the flock's cost estimate, the connections dialog lists every live cluster on each flock with its owner, and `After N hours` is there for a timed stop. A forgotten cluster bills until someone zaps it; that is the design, and it is why nothing stops one silently.
+
+### Security
+
+The factory holds a credential as capable as your flock login: it can start and stop any cluster on that flock, write to any cluster's `environment/` folder, and start a cluster with `trust deploy` on. That last one is what the `trust deploy` tick in the Tools menu does, and only that tick: `@deploy` in a prompt does not turn it on, Import and Reload drop the flag from the document they read, and the card shows a `trust deploy` chip while it is on. The cluster's nodes get the flock's Deploy MCP and the IAM role that may run `cdk deploy`, and the stacks they deploy are real resources in the flock's account, billed there and kept until destroyed. The flock keeps that within bounds (its own `kflock` CDK bootstrap, a deploy role that only touches stacks tagged `KiroFlockManaged`, a permissions boundary on every role a deployed stack creates, and a snapshot of the deployed source under `deploy-src/`), and the flock dashboard lists and destroys what was deployed. Because the local loops can read the token (next sentence), a local agent that drives this app's own API can still tick it, and the chip on the card is there to be seen when it does. Run the factory in an account meant for that, and keep `trust deploy` off on loops that do not need it. It only uses it for clusters it created (the `kf-` prefix plus its own marker in the direction) except in the orphan list, which is explicit and confirm-gated. Tokens never reach the browser; the only request carrying a password is the sign-in POST, behind the same per-run token every write here needs. The server fetches the URL you typed: `https` only, no private or local addresses (checked at connect time, so a changing DNS answer cannot slip past), no redirects, 15 s timeout, 5 MB cap, and only `/auth-config.json` and `/cluster/*` are ever requested. Cognito is reached through `@aws-sdk/client-cognito-identity-provider` in the region derived from the pool id, never at an address the flock served.
+
 ## Parking a loop
 
 **The power button top-right of a card disables the loop.** A disabled loop is left out of every start: its own Start button, `Run all`, an API call made directly. Everything else still works - edit it, rewire it, wire *to* it, and its queues still collect items for the day it wakes.
@@ -319,6 +386,9 @@ Nothing has to be set: every one of these has a default, and the app is meant to
 | `REGISTRY` | `~/.kirofactory/factories.json` | The list of factories this machine knows, and which of them are tabs. Local state, not a design. In your home directory so every checkout shares one list; set this to keep a separate one. |
 | `LIBRARY_DIR` | `library/` in this checkout | The library the picker reads and the save buttons write to. Point it elsewhere to keep a library of your own outside this repository. |
 | `BASE_DIR` | `app/workspace` | Where the shipped sample lands on a first run. |
+| `KIROFACTORY_INSECURE_FLOCK` | unset | `1` lets a flock connection use plain `http://` to a loopback address, for the mock flock (`npm run mock-flock`). Nothing else is relaxed and the server says so at start. Not for a real factory. |
+| `KIROFACTORY_COGNITO_ENDPOINT` | unset | With the flag above, where Cognito calls go instead of `cognito-idp.<region>.amazonaws.com`. The mock prints the value to set. Ignored otherwise. |
+| `MOCK_FLOCK_PORT` | `19840` | The port the mock flock listens on. |
 
 ## Talking to the server yourself
 

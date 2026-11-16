@@ -1588,6 +1588,11 @@ select.model-pick.inherited {
   color: color-mix(in srgb, var(--accent) 70%, var(--text));
 }
 
+/* Trust deploy: the cluster may create resources in the flock's account. Halt colour, always. */
+.loop-marks .mark-deploy {
+  border-color: color-mix(in srgb, var(--halt) 55%, var(--line));
+  color: var(--halt);
+}
 /*
  * The member count. Grey while the cluster is down, green while members are up.
  *
@@ -1624,6 +1629,19 @@ select.model-pick.inherited {
   gap: 8px;
 }
 
+/* Footer row plus the cost line beneath it, kept together as one child of the card. */
+.loop-bottom {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+/* The loop's cost, on its own line under the Stop and force stop row. */
+.cost.foot-cost {
+  display: block;
+  margin-left: 0;
+  font-size: 10px;
+  white-space: nowrap;
+}
 .loop-foot .start:hover {
   border-color: var(--run);
 }
@@ -3793,21 +3811,25 @@ button.danger:hover:not(:disabled) {
   cursor: default;
 }
 
+/*
+ * The folder, read-only. Truncated from the left like the files panel's path,
+ * because the end of a path is the part that names the project.
+ */
 .dirbar-path {
-  flex: 1;
-  min-width: 160px;
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 760px;
-  padding: 4px 9px;
-  background: var(--sunken);
+  overflow: hidden;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
   color: var(--text);
-  border: 1px solid var(--line);
-  border-radius: 6px;
   font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
-  outline: none;
 }
 
-.dirbar-path:focus {
-  border-color: var(--accent);
+.dirbar .files-copy {
+  flex: none;
+  padding: 2px 4px;
 }
 
 /* The suffix is not editable: every factory keeps its things in the same folder. */
@@ -3882,6 +3904,25 @@ button.danger:hover:not(:disabled) {
 .dirbar-git .icon {
   flex: none;
   opacity: 0.85;
+}
+
+/*
+ * The badge is a flex container, and text-overflow does nothing to a flex
+ * container's bare text, so a name that should ellipsize has to be its own
+ * shrinkable item. `.tail` puts the ellipsis on the left, for names whose
+ * distinguishing part is at the end; the `bdi` inside keeps the text itself
+ * left-to-right.
+ */
+.dirbar-git-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dirbar-git-name.tail {
+  direction: rtl;
+  text-align: left;
 }
 
 /*
@@ -4294,15 +4335,96 @@ button.danger:hover:not(:disabled) {
 .picker-path {
   flex: 1;
   min-width: 0;
-  overflow-x: auto;
-  white-space: nowrap;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  outline: none;
+  background: transparent;
   font: 11px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--dim);
-  scrollbar-width: none;
 }
 
-.picker-path::-webkit-scrollbar {
-  display: none;
+.picker-path:hover {
+  border-color: var(--line);
+}
+
+.picker-path:focus {
+  border-color: var(--accent);
+  color: var(--text);
+  background: var(--sunken);
+}
+
+/* What a forced-open picker is asking: "Where should X go?" */
+.picker-heading {
+  margin: 0;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--text);
+}
+
+/* A row is the folder button, plus the go-inside arrow on a factory's row. */
+.picker-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.picker-row .picker-entry {
+  flex: 1;
+  min-width: 0;
+}
+
+.picker-row .picker-descend {
+  flex: none;
+  padding: 3px 4px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--dim);
+}
+
+.picker-row .picker-descend:hover {
+  background: var(--sunken);
+  color: var(--text);
+}
+
+/* Where `+` puts new factories, above the footer. */
+.picker-default {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 10px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--dim);
+  min-width: 0;
+}
+
+.picker-default code {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+  font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
+}
+
+.picker-default span {
+  flex: none;
+}
+
+.picker-link {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 11px;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
 }
 
 /*
@@ -4550,6 +4672,11 @@ button.danger:hover:not(:disabled) {
 .picker-foot button:not(:last-child) {
   flex: 1;
   min-width: 0;
+}
+
+/* One line per button: a wrapped label doubles the footer's height. */
+.picker-foot button {
+  white-space: nowrap;
 }
 
 /* A factory's name rides in the open button, and a factory can be called anything. */
@@ -4948,6 +5075,12 @@ button.danger:hover:not(:disabled) {
   white-space: nowrap;
   direction: rtl;
   text-align: left;
+}
+
+/* The copy-path button beside the path: never squeezed out by a long path. */
+.files-bar .files-copy {
+  flex: none;
+  padding: 2px 4px;
 }
 
 .files-sort {
@@ -5526,4 +5659,794 @@ button.danger:hover:not(:disabled) {
 
 .files-front td {
   padding: 1px 10px 1px 0;
+}
+
+/* ---------------------------------------------------------------------- cost */
+/*
+ * Credits kiro-cli metered, beside whatever they belong to: an iteration divider,
+ * a loop card's #N, a cluster node tab, a factory tab. Dim and tabular so a
+ * column of them lines up, and small enough not to compete with the label.
+ */
+:root {
+  /* The amber kiro-flock uses for cost, so the two dashboards read alike. */
+  --cost: #e8a45c;
+}
+.cost {
+  margin-left: 10px;
+  color: var(--cost);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+.cost.unmetered {
+  font-style: italic;
+}
+.iteration .cost {
+  margin-left: 0;
+}
+.member-tab .cost {
+  margin-left: 6px;
+}
+/* The factory's total sits in the toolbar beside "running" and opens its run history. */
+.header-cost {
+  flex: none;
+  /* Money above credits, the pair no taller than the toolbar's own line. */
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 0 4px;
+  background: none;
+  border: none;
+  color: var(--cost);
+  font-size: 12px;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.header-cost span:first-child {
+  font-size: 15px;
+  font-weight: 600;
+}
+.header-cost:hover span {
+  filter: brightness(1.2);
+}
+dialog.confirm.usage-history {
+  width: 560px;
+  max-width: 92vw;
+}
+.usage-runs {
+  width: 100%;
+  margin-top: 12px;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.usage-runs th {
+  text-align: left;
+  padding: 4px 6px;
+  color: var(--dim);
+  font-weight: 500;
+  border-bottom: 1px solid var(--line-strong);
+}
+.usage-runs td {
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--line);
+}
+.usage-run {
+  cursor: pointer;
+}
+.usage-run:hover {
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+.usage-loop td {
+  color: var(--dim);
+  padding-left: 18px;
+}
+.usage-current {
+  margin-left: 8px;
+  padding: 0 6px;
+  border: 1px solid var(--run);
+  border-radius: 8px;
+  color: var(--run);
+  font-size: 10.5px;
+}
+
+/* ============================================================ remote loops */
+
+/*
+ * A remote loop is a loop cluster on the canvas, and everything below is the
+ * small set of things that differ: the badge says `remote` and may carry a
+ * warning mark, a bar above the member strip names the flock and the cluster,
+ * the settings row is the flock's shape rather than the local one, and the
+ * bottom half shows the node's own transcript. The remote colour token is a
+ * cool blue so it is never read as the amber of a draining loop.
+ */
+:root {
+  --remote: #5aa9ff;
+}
+
+/*
+ * A remote card wears its algorithm, in the flock's own palette.
+ *
+ * The flock's dashboard tints a cluster by how its nodes talk to each other -
+ * amorphous purple, mesh red, swarm blue, single green - and a remote card is that
+ * cluster, so it takes the same colour: the resting border, a wash on the face
+ * and the stack, the badge's tab and its `remote` word. The whole card, so the
+ * mode is readable from across the canvas the way it is on the flock.
+ *
+ * Only at rest for the border and the badge. Running, paused, stopping and
+ * selected keep their own colours - those answer "is it going", which is the
+ * question a glance asks first, and the `:not()` chain is what lets the state
+ * rules above win without being restated. The wash stays in every state, so a
+ * running mesh is still visibly a mesh.
+ *
+ * `--remote` on the card follows the algorithm so anything on it that used the
+ * generic remote blue takes the mode's colour instead; the panel's bar, which is
+ * not on the card, keeps the blue.
+ */
+.loop.remote {
+  --algo: #9046ff;
+  --remote: var(--algo);
+}
+
+.loop.remote.algo-mesh {
+  --algo: #d85a49;
+}
+
+.loop.remote.algo-swarm {
+  --algo: #6aa6d6;
+}
+
+.loop.remote.algo-single {
+  --algo: #3d8a6a;
+}
+
+.loop.remote:not(.running):not(.paused):not(.stopping):not(.selected) {
+  border-color: color-mix(in srgb, var(--algo) 60%, var(--line));
+}
+
+.loop.remote.cluster::before,
+.loop.remote .stack-box {
+  background: color-mix(in srgb, var(--algo) 8%, var(--surface));
+}
+
+.loop.remote:not(.running):not(.paused):not(.stopping):not(.selected) .stack-box {
+  border-color: color-mix(in srgb, var(--algo) 40%, var(--line));
+}
+
+.loop.remote:not(.running):not(.paused):not(.stopping):not(.selected) .flock-badge {
+  --badge: var(--algo);
+}
+
+.flock-badge.remote .flock-local {
+  color: var(--remote);
+}
+
+/* The mode select in the panel, bordered like the flock's own. */
+.remote-settings .remote-algo.algo-amorphous { border-color: #9046ff; }
+.remote-settings .remote-algo.algo-mesh { border-color: #d85a49; }
+.remote-settings .remote-algo.algo-swarm { border-color: #6aa6d6; }
+.remote-settings .remote-algo.algo-single { border-color: #3d8a6a; }
+
+.flock-badge.remote.warn {
+  --badge: var(--halt);
+}
+
+.flock-warn {
+  display: inline-grid;
+  place-items: center;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--halt);
+  color: var(--bg);
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+/* The bar above the member strip. */
+.remote-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: none;
+  padding: 6px 8px;
+  margin-bottom: 4px;
+  border-radius: 6px;
+  border-left: 2px solid color-mix(in srgb, var(--remote) 60%, transparent);
+  background: color-mix(in srgb, var(--remote) 7%, transparent);
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.remote-bar-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.remote-bar-row svg {
+  width: 14px;
+  height: 14px;
+  color: var(--remote);
+}
+
+.remote-conn {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.remote-id {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 10px;
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.remote-id:hover {
+  border-color: var(--line);
+  color: var(--text);
+}
+
+.remote-id svg {
+  width: 11px;
+  height: 11px;
+  color: inherit;
+}
+
+.remote-state {
+  padding: 1px 6px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.remote-state.running { border-color: var(--run); color: var(--run); }
+.remote-state.starting { border-color: var(--remote); color: var(--remote); }
+.remote-state.paused { border-color: var(--halt); color: var(--halt); }
+.remote-state.stopping { border-color: var(--halt); color: var(--halt); }
+.remote-state.gone, .remote-state.unknown { border-color: var(--line); color: var(--dim); }
+
+.remote-cost,
+.remote-queues {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 10px;
+}
+
+.remote-open {
+  margin-left: auto;
+  color: var(--remote);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.remote-open:hover {
+  text-decoration: underline;
+}
+
+.remote-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--halt) 16%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--halt) 50%, transparent);
+  color: var(--text);
+}
+
+.remote-banner svg {
+  width: 16px;
+  height: 16px;
+  color: var(--halt);
+  flex: none;
+}
+
+.remote-banner button {
+  margin-left: auto;
+  flex: none;
+}
+
+.remote-note {
+  font-style: italic;
+}
+
+.remote-note.error {
+  color: var(--stop);
+  font-style: normal;
+}
+
+/* The settings row: the flock's shape in place of the local cluster's. */
+.remote-settings {
+  flex-wrap: wrap;
+  /* Bottom-aligned: every field is a label over a control of one height, so the
+     controls share a line and no field stands lower than another. */
+  align-items: flex-end;
+  gap: 2px 10px;
+  padding: 3px 9px 4px;
+}
+
+/* Every field: a small label on top, its control below. */
+.remote-num {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+}
+
+.remote-num .unit {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--dim);
+  line-height: 1.1;
+}
+
+/* One control height for all of them. */
+.remote-settings .remote-num button,
+.remote-settings .remote-num select,
+.remote-settings .remote-num input[type='number'] {
+  box-sizing: border-box;
+  height: 24px;
+  margin: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  font-size: 12px;
+}
+
+.remote-num input[type='number'] {
+  width: 5.5em;
+  padding-left: 5px;
+  padding-right: 5px;
+}
+
+/* Three short rows: the menu is as wide as its labels, not the MCP menu's 220px. */
+.remote-settings .remote-options .mcp-menu {
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.remote-settings .remote-pick-conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.remote-settings .remote-pick-conn svg {
+  width: 13px;
+  height: 13px;
+  color: var(--remote);
+}
+
+.remote-num .hint {
+  color: var(--halt);
+}
+
+.remote-settings .remote-fixed {
+  flex-basis: 100%;
+  line-height: 1.2;
+}
+
+.remote-problems {
+  margin: 0 0 6px;
+  padding: 6px 8px 6px 22px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--halt) 12%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--halt) 45%, transparent);
+  font-size: 11px;
+  color: var(--text);
+}
+
+.remote-problems li {
+  margin: 1px 0;
+}
+
+/* The bottom half: ACP, Console, Bridge. */
+.remote-out {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.remote-out-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 4px 0 6px;
+}
+
+.remote-out-bar .seg button {
+  padding: 2px 10px;
+  font-size: 11px;
+}
+
+.remote-iter {
+  width: auto;
+  font-size: 11px;
+  padding: 2px 6px;
+}
+
+.remote-fetched {
+  margin-left: auto;
+  font-size: 10px;
+}
+
+.remote-out-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--sunken, var(--bg));
+}
+
+.remote-out-body .output {
+  border: 0;
+  padding: 0;
+  background: none;
+}
+
+.remote-console {
+  margin: 0;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}
+
+.remote-turn-error {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 5px;
+  border: 1px solid color-mix(in srgb, var(--stop) 50%, transparent);
+  background: color-mix(in srgb, var(--stop) 10%, var(--surface));
+  font-size: 11px;
+  color: var(--text);
+}
+
+.remote-steer-note {
+  flex: none;
+  margin: 6px 0 0;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--dim);
+}
+
+/*
+ * The ACP transcript, rendered as markdown. Ported from the flock's
+ * `kiro-node.css` `.kn-md` rules so the pane reads like the flock's own, with
+ * this app's tokens in place of the flock's.
+ */
+.kn-md {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.kn-md h3 {
+  margin: 14px 0 6px;
+  padding-top: 10px;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--dim);
+  border-top: 1px solid var(--line);
+}
+
+.kn-md h3:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.kn-md h2 {
+  font-size: 13px;
+  color: var(--text);
+  margin: 12px 0 6px;
+}
+
+.kn-md p {
+  margin: 4px 0;
+}
+
+.kn-md pre {
+  margin: 6px 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+
+.kn-md code {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+}
+
+.kn-md :not(pre) > code {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--surface);
+}
+
+.kn-md blockquote {
+  margin: 6px 0;
+  padding-left: 8px;
+  border-left: 2px solid var(--accent);
+  color: var(--dim);
+}
+
+.kn-md ul,
+.kn-md ol {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+
+.kn-md a {
+  color: var(--accent-soft);
+}
+
+/* ---- the connections dialog ---- */
+
+.flock-dialog {
+  width: min(760px, 92vw);
+  max-height: 88vh;
+  overflow: auto;
+}
+
+.flock-dialog > p {
+  color: var(--dim);
+}
+
+.flock-dialog .spacer {
+  flex: 1;
+}
+
+.flock-dialog .primary {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 22%, var(--surface));
+  color: #fff;
+}
+
+.flock-list {
+  list-style: none;
+  margin: 10px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.flock-row {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.flock-row-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.flock-row-name {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.flock-row-host,
+.flock-row-user {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.flock-row-state {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.flock-signed {
+  padding: 1px 7px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.flock-signed.in { border-color: var(--run); color: var(--run); }
+.flock-signed.out { border-color: var(--halt); color: var(--halt); }
+
+.flock-needs-update {
+  padding: 1px 7px;
+  border-radius: 9px;
+  border: 1px solid var(--stop);
+  color: var(--stop);
+  font-size: 10px;
+}
+
+.flock-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.flock-row-actions button {
+  font-size: 11px;
+  padding: 3px 9px;
+}
+
+.flock-signin {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.flock-signin input[type='password'] {
+  width: 14em;
+}
+
+.flock-signin label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.flock-clusters {
+  width: 100%;
+  margin-top: 6px;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.flock-clusters th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--dim);
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+.flock-clusters td {
+  padding: 3px 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 50%, transparent);
+  vertical-align: top;
+}
+
+.flock-clusters td a {
+  color: var(--remote);
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 10px;
+}
+
+.flock-clusters tr.orphan td {
+  background: color-mix(in srgb, var(--halt) 8%, transparent);
+}
+
+.flock-clusters .state.running { color: var(--run); }
+.flock-clusters .state.paused { color: var(--halt); }
+.flock-clusters .cost { font-family: var(--mono, ui-monospace, monospace); white-space: nowrap; }
+.flock-clusters .actions { white-space: nowrap; text-align: right; }
+.flock-clusters .actions button { font-size: 10px; padding: 1px 7px; margin-left: 4px; }
+
+.flock-add {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.flock-add label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.flock-add label input[type='text'],
+.flock-add label input[type='url'],
+.flock-add label input[type='password'] {
+  width: 100%;
+  font-size: 12px;
+}
+
+.flock-add-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.flock-add details summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.flock-add details > div {
+  margin-top: 8px;
+}
+
+.flock-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The per-cluster choices in the close-factory dialog. */
+.confirm-remotes {
+  margin: 10px 0 4px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--remote) 50%, transparent);
+  background: color-mix(in srgb, var(--remote) 8%, var(--surface));
+  font-size: 12px;
+}
+
+.confirm-remotes > p {
+  margin: 0 0 6px;
+  color: var(--text);
+}
+
+.confirm-remote {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 4px 0;
+  border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+
+.confirm-remote-name {
+  flex: 1 1 100%;
+  color: var(--text);
+}
+
+.confirm-remote-name code {
+  font-size: 10px;
+  color: var(--dim);
+}
+
+.confirm-remote label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--dim);
+  cursor: pointer;
 }

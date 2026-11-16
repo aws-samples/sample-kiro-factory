@@ -51,6 +51,10 @@ const PATHS = {
   factory:
     'M2.25 20.25V6.75H6v7.5l5.25-3.75V14.25L16.5 10.5v3.75l5.25-3.75v9.75Z',
 
+  /* Make a new folder, in the Open picker. */
+  'hero-folder-plus':
+    'M12 10.5v6m3-3H9m4.06-7.19-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z',
+
   /* A loop. Circular arrows, which is what the component actually does. */
   'hero-arrow-path':
     'M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99',
@@ -110,6 +114,20 @@ const PATHS = {
   'hero-power': ['M12 3.75v6.75', 'M6.7 7.05a7.5 7.5 0 1 0 10.6 0'],
 
   'hero-plus': 'M12 4.5v15m7.5-7.5h-15',
+
+  /* The connections dialog: settings, in the plainest sense. */
+  'hero-cog-6-tooth': [
+    'M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 0 1 0 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 0 1 0-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28Z',
+    'M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z',
+  ],
+
+  /* A remote loop: a cluster that runs on a flock elsewhere. */
+  'hero-cloud':
+    'M2.25 15a4.5 4.5 0 0 0 4.5 4.5H18a3.75 3.75 0 0 0 1.332-7.257 3 3 0 0 0-3.758-3.848 5.25 5.25 0 0 0-10.233 2.33A4.502 4.502 0 0 0 2.25 15Z',
+
+  /* Something to look at before pressing on: a sync that stopped, a connection gone. */
+  'hero-exclamation-triangle':
+    'M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z',
   'hero-minus': 'M5 12h14',
 
   /*
@@ -219,8 +237,25 @@ const PATHS = {
   'hero-bookmark-square':
     'M16.5 3.75V16.5L12 14.25 7.5 16.5V3.75m9 0H18A2.25 2.25 0 0 1 20.25 6v12A2.25 2.25 0 0 1 18 20.25H6A2.25 2.25 0 0 1 3.75 18V6A2.25 2.25 0 0 1 6 3.75h1.5m9 0h-9',
 
+  /*
+   * Reload from the library. An arrow landing in a square: the entry coming back
+   * into this factory. The square pairs it with the bookmark beside it, which is the
+   * same collection in the other direction. Not `arrow-path`, which means a loop
+   * everywhere else in here.
+   */
+  'hero-arrow-down-on-square':
+    'M9 8.25H7.5a2.25 2.25 0 0 0-2.25 2.25v9a2.25 2.25 0 0 0 2.25 2.25h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25H15M9 12l3 3m0 0 3-3m-3 3V2.25',
+
   /* Done. Shown for a moment in place of an action that succeeded. */
   'hero-check': 'm4.5 12.75 6 6 9-13.5',
+
+  /*
+   * Copy to the clipboard. On the remote bar's cluster id, which is the one
+   * value in this app an operator carries somewhere else by hand - into a
+   * prompt for the flock's own MCP, or the flock dashboard's search.
+   */
+  'hero-clipboard':
+    'M15.666 3.888A2.25 2.25 0 0 0 13.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 0 1-.75.75H9a.75.75 0 0 1-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 0 1-2.25 2.25H6.75A2.25 2.25 0 0 1 4.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 0 1 1.927-.184',
 
   /*
    * The interval a loop leaves between turns: a clock.

@@ -84,12 +84,11 @@ export interface FoundFactory {
 /**
  * Read the document in `<dir>/.kirofactory/`, if there is one worth reading.
  *
- * Undefined for anything that is not a registrable factory: no document, a document
- * that will not parse, or one with no `id`. The id is the only field with no
- * fallback, because it is what the registry keys on and what tells a moved factory
- * apart from a new one - inventing one here would turn every unreadable folder into
- * a fresh phantom factory on every scan. A missing name falls back to the id, the
- * same way `Registry.read` does.
+ * Undefined for anything that is not a factory: no document, or a document that
+ * will not parse. A document without an `id` is still a factory - the app writes
+ * ids, agents are told not to - so it comes back with `id: ''` and the caller
+ * mints one. A repeat scan cannot mint a second, because the caller matches on the
+ * folder before it looks at ids. A missing name falls back to the folder's name.
  */
 async function readFound(dir: string): Promise<FoundFactory | undefined> {
   const doc = path.join(dir, INTERNAL, DOC_NAME);
@@ -98,8 +97,10 @@ async function readFound(dir: string): Promise<FoundFactory | undefined> {
     const raw: unknown = JSON.parse(await fsp.readFile(doc, 'utf8'));
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
     const { id, name } = raw as { id?: unknown; name?: unknown };
-    if (typeof id !== 'string' || id.length === 0) return undefined;
-    return { dir, id, name: typeof name === 'string' && name.length > 0 ? name : id };
+    // No id is a factory an agent wrote by hand, which is how they are meant to be
+    // written now. The caller mints one; '' says there was none.
+    const own = typeof id === 'string' ? id : '';
+    return { dir, id: own, name: typeof name === 'string' && name.length > 0 ? name : path.basename(dir) };
   } catch {
     return undefined;
   }

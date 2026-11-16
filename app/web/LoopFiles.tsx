@@ -52,6 +52,7 @@ import {
   type FileDiff,
   type GitState,
   type LoopFileEntry,
+  type ProjectFolderEntry,
   type WorktreeEntry,
 } from './api.ts';
 import { nodeLabel } from './types.ts';
@@ -208,6 +209,37 @@ function baseName(path: string): string {
   return path.split('/').pop() ?? path;
 }
 
+/**
+ * A small button that puts a path on the clipboard.
+ *
+ * A page served from localhost cannot link to a folder on disk (browsers refuse
+ * `file://` from http), so copying the path is what is on offer: paste it into
+ * Finder's Go to Folder, a terminal, or an editor. Shows a check for a moment
+ * afterwards, the same way the remote bar's cluster id does.
+ */
+export function CopyPath({ value }: { value: string }): React.ReactElement {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      className="with-icon files-copy"
+      type="button"
+      title={`Copy path: ${value}`}
+      aria-label="Copy path to clipboard"
+      onClick={() => {
+        void navigator.clipboard
+          .writeText(value)
+          .then(() => {
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 1600);
+          })
+          .catch(() => undefined);
+      }}
+    >
+      <Icon name={copied ? 'hero-check' : 'hero-clipboard'} />
+    </button>
+  );
+}
+
 interface OpenFile {
   path: string;
   content: string;
@@ -251,7 +283,7 @@ export function LoopFiles({
    * The name as well as the id, because the switch labels itself with it and the
    * confirm dialogs say it, and the panel has no other way to look one up.
    */
-  loop: { id: string; name: string } | null;
+  loop: { id: string; name: string; remote?: boolean } | null;
   /**
    * What git makes of the factory's directory, or null before the first answer.
    *
@@ -296,6 +328,16 @@ export function LoopFiles({
    * exactly this list. Changes never sets it - git's list is never capped.
    */
   const [truncated, setTruncated] = useState(false);
+  /**
+   * The project's folders, with their entry counts, or null for the flat sources.
+   *
+   * The project is listed one open folder at a time, so a closed folder has no files
+   * in `files` to be inferred from - it arrives here instead, and the tree makes a
+   * row of it with its count.
+   */
+  const [folders, setFolders] = useState<ProjectFolderEntry[] | null>(null);
+  /** Project folders that held more entries than the server sends. `''` is the root. */
+  const [capped, setCapped] = useState<string[]>([]);
   const [openFolders, setOpenFolders] = useState<Set<string>>(new Set());
   const [sort, setSort] = useState<SortMode>(storedSort);
   const [file, setFile] = useState<OpenFile | null>(null);
@@ -379,6 +421,12 @@ export function LoopFiles({
   const loopId = target === 'loop' && loop !== null ? loop.id : null;
   const loopName = loop?.name ?? '';
   /**
+   * A remote loop's "own folder" is its cluster's S3 subtree, read through the
+   * flock. Same tree, same viewer, no deletes: the flock's agents own those files
+   * and the factory only ever writes to the queue folders.
+   */
+  const isRemote = loopId !== null && loop?.remote === true;
+  /**
    * The checkout the project view is reading, or null for the main directory.
    *
    * `auto` resolves through the selection, and only to a checkout that is
@@ -397,7 +445,7 @@ export function LoopFiles({
           ? projectPick
           : null;
   /** Only a loop's own folder has deletes. The other two read something real. */
-  const readOnly = !isProject && !isChanges ? loopId === null : true;
+  const readOnly = !isProject && !isChanges ? loopId === null || isRemote : true;
   /** Nothing to show yet, and no request to make either. */
   const idle = !isProject && !isChanges && loopId === null;
   /** Changes needs a repository to compare against. See `GitState`. */
@@ -407,6 +455,26 @@ export function LoopFiles({
     window.localStorage.setItem(STORE_SORT, sort);
     window.localStorage.setItem(STORE_RANGE, range);
   }, [sort, range]);
+
+  /**
+   * The project folders to list besides the root: the open ones that are on screen,
+   * which means every folder above them is open too. A folder left open inside one
+   * that was then closed is remembered, not fetched.
+   *
+   * Joined into one string so the fetch below depends on a value rather than on a
+   * Set whose identity changes with every toggle of anything.
+   */
+  const shownFolders = useMemo(() => {
+    if (!isProject) return '';
+    const visible = [...openFolders].filter((p) => {
+      const parts = p.split('/').filter((s) => s.length > 0);
+      for (let i = 1; i < parts.length; i++) {
+        if (!openFolders.has(`${parts.slice(0, i).join('/')}/`)) return false;
+      }
+      return true;
+    });
+    return visible.sort().join('\n');
+  }, [isProject, openFolders]);
 
   const load = useCallback((): void => {
     if (!isProject && !isChanges && loopId === null) return;
@@ -449,10 +517,23 @@ export function LoopFiles({
         .catch(() => undefined);
     }
 
-    void (isProject
-      ? api.projectFiles(factoryId, projectCheckout ?? undefined)
-      : api.loopFiles(factoryId, loopId!)
-    )
+    if (isProject) {
+      const wanted = shownFolders.length === 0 ? [] : shownFolders.split('\n');
+      void api
+        .projectFiles(factoryId, wanted, projectCheckout ?? undefined)
+        .then((res) => {
+          setDir(res.dir);
+          setFiles(res.files);
+          setFolders(res.folders);
+          setCapped(res.capped);
+          setTruncated(res.truncated ?? false);
+          setError(null);
+        })
+        .catch((e: Error) => setError(e.message));
+      return;
+    }
+
+    void (isRemote ? api.remoteFiles(factoryId, loopId!) : api.loopFiles(factoryId, loopId!))
       .then((res) => {
         setDir(res.dir);
         setFiles(res.files);
@@ -465,7 +546,7 @@ export function LoopFiles({
         }
       })
       .catch((e: Error) => setError(e.message));
-  }, [factoryId, isProject, isChanges, checkoutKey, projectCheckout, loopId, range, onFiles]);
+  }, [factoryId, isProject, isChanges, isRemote, checkoutKey, projectCheckout, loopId, range, onFiles, shownFolders]);
 
   // Back to following the selection whenever it moves. A hand-picked worktree
   // is an answer to "while I am here, show me that one", not a standing setting.
@@ -485,6 +566,8 @@ export function LoopFiles({
     setDiff(null);
     setOpenFolders(new Set());
     setFiles([]);
+    setFolders(null);
+    setCapped([]);
     setTruncated(false);
     setStatuses({});
     setChangesNote(null);
@@ -517,9 +600,10 @@ export function LoopFiles({
   useEffect(() => {
     load();
     if (!open) return;
-    const timer = window.setInterval(load, isChanges ? CHANGES_POLL_MS : POLL_MS);
+    // A remote listing is a flock call per poll, so it goes at the slower cadence.
+    const timer = window.setInterval(load, isChanges || isRemote ? CHANGES_POLL_MS : POLL_MS);
     return () => window.clearInterval(timer);
-  }, [open, load, isChanges]);
+  }, [open, load, isChanges, isRemote]);
 
   /**
    * Open a row: a file's text, or in the changes view a file's two sides.
@@ -555,7 +639,9 @@ export function LoopFiles({
 
     void (isProject
       ? api.projectFile(factoryId, path, projectCheckout ?? undefined)
-      : api.loopFile(factoryId, loopId!, path)
+      : isRemote
+        ? api.remoteFile(factoryId, loopId!, path)
+        : api.loopFile(factoryId, loopId!, path)
     )
       .then((body) =>
         setFile({
@@ -646,7 +732,9 @@ export function LoopFiles({
     });
   }
 
-  const tree = useMemo(() => buildTree(files), [files]);
+  const tree = useMemo(() => buildTree(files, folders ?? undefined), [files, folders]);
+  /** Anything to draw. The project's root can hold only folders, so files alone is not it. */
+  const hasEntries = files.length > 0 || (folders?.length ?? 0) > 0;
 
   /*
    * The diff, laid out, and how big it is.
@@ -685,10 +773,29 @@ export function LoopFiles({
               <span className="files-twist">{isOpen ? '\u2212' : '+'}</span>
               <Icon name={isOpen ? 'hero-folder-open' : 'hero-folder'} />
               <span className="files-name">{node.name}</span>
-              <span className="files-meta">
-                {fmtBytes(node.size)}
-                {node.time > 0 && ` \u00b7 ${fmtWhen(node.time)}`}
-              </span>
+              {/*
+                A project folder says how many entries it holds rather than a size
+                and a time: only the open folders are fetched, so a sum would be of
+                whatever happened to be loaded.
+              */}
+              {node.count !== undefined ? (
+                <span className="files-meta">
+                  {node.count.toLocaleString()} item{node.count === 1 ? '' : 's'}
+                  {isOpen && capped.includes(node.path) && (
+                    <span
+                      className="files-cap"
+                      title="This folder holds more entries than the panel lists. The first ones by name are shown; everything is still on disk."
+                    >
+                      {' \u00b7 '}first {(node.children.length).toLocaleString()} shown
+                    </span>
+                  )}
+                </span>
+              ) : (
+                <span className="files-meta">
+                  {fmtBytes(node.size)}
+                  {node.time > 0 && ` \u00b7 ${fmtWhen(node.time)}`}
+                </span>
+              )}
             </div>
           </li>,
         );
@@ -777,13 +884,17 @@ export function LoopFiles({
     setError(null);
     void (async () => {
       for (const f of todo) {
-        const res = isProject
-          ? await api.uploadProjectFile(factoryId, f.name, f, projectCheckout ?? undefined)
-          : await api.uploadLoopFile(factoryId, loopId!, f.name, f);
+        if (isProject) {
+          // Answers with the root alone; the open folders come back with the reload.
+          await api.uploadProjectFile(factoryId, f.name, f, projectCheckout ?? undefined);
+          continue;
+        }
+        const res = await api.uploadLoopFile(factoryId, loopId!, f.name, f);
         setDir(res.dir);
         setFiles(res.files);
         setTruncated(res.truncated ?? false);
       }
+      if (isProject) load();
     })().catch((e: Error) => setError(e.message));
   }
 
@@ -829,6 +940,7 @@ export function LoopFiles({
             <span className="files-path" title={file.path}>
               {file.path}
             </span>
+            <CopyPath value={dir.length > 0 ? `${dir.replace(/\/$/, '')}/${file.path}` : file.path} />
             {/*
               How big the change is, on the bar rather than over the diff.
               
@@ -925,7 +1037,9 @@ export function LoopFiles({
                 title={
                   loop === null
                     ? 'Select a loop on the factory floor to see what it has written'
-                    : `What ${loopName} has written`
+                    : loop.remote === true
+                      ? `What ${loopName}'s cluster has in S3: its queues and its nodes' scratch. Read-only.`
+                      : `What ${loopName} has written`
                 }
               >
                 <Icon name="hero-folder" />
@@ -955,9 +1069,12 @@ export function LoopFiles({
               </button>
             </div>
             {dir.length > 0 && (
-              <span className="files-path" title={dir}>
-                {dir}
-              </span>
+              <>
+                <span className="files-path" title={dir}>
+                  {dir}
+                </span>
+                <CopyPath value={dir} />
+              </>
             )}
             <span className="spacer" />
             {/*
@@ -1014,7 +1131,7 @@ export function LoopFiles({
                 <option value="branch">since branch point</option>
               </select>
             )}
-            {files.length > 0 && (
+            {hasEntries && (
               <>
                 {/*
                   Only when the listing is incomplete. A cap that is not being hit
@@ -1022,13 +1139,21 @@ export function LoopFiles({
                   tree on screen - some files exist that this panel is not showing -
                   and that is worth a quiet caption where the eye already goes to
                   change how the list is shown.
+
+                  For the project this is the root only; a capped subfolder says so
+                  on its own row.
                 */}
                 {truncated && (
                   <span
                     className="files-cap"
-                    title="The project has more files than the panel lists. The walk stops here so the listing stays cheap; everything is still on disk."
+                    title={
+                      isProject
+                        ? 'The top folder holds more entries than the panel lists. The first ones by name are shown; everything is still on disk.'
+                        : 'This folder has more files than the panel lists. The walk lists each level before the next and stops here, so the deepest files are the ones left out; everything is still on disk.'
+                    }
                   >
-                    first {files.length.toLocaleString()} files
+                    first {(isProject ? tree.children.length : files.length).toLocaleString()}{' '}
+                    {isProject ? 'entries' : 'files'}
                   </span>
                 )}
                 <select
@@ -1077,7 +1202,7 @@ export function LoopFiles({
             against, so nothing to show here. Run <code>git init</code> in the directory, or branch off
             into a worktree from the bar above.
           </p>
-        ) : files.length === 0 ? (
+        ) : !hasEntries ? (
           <p className="empty">
             {isChanges
               ? (changesNote ??

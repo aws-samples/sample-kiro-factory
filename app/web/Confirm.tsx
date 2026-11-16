@@ -17,7 +17,7 @@
  * mounted while a question is open, so there is exactly one in the DOM at a
  * time and it cannot leak stale callbacks.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 
 export interface ConfirmAsk {
   title: string;
@@ -29,6 +29,12 @@ export interface ConfirmAsk {
    * restating what the body already says.
    */
   warning?: string;
+  /**
+   * Controls the question needs answered along with it, between the body and
+   * the actions: the per-cluster choices a factory with remote loops asks about
+   * before it is deleted. Owned by the asker, which reads them in `onConfirm`.
+   */
+  extra?: ReactNode;
   /** What the confirming button says, which is what confirming does. */
   action: string;
   onConfirm: () => void;
@@ -97,6 +103,7 @@ export function Confirm({ ask, onClose }: { ask: ConfirmAsk | null; onClose: () 
       <h2>{ask.title}</h2>
       {ask.body !== undefined && <p>{ask.body}</p>}
       {ask.warning !== undefined && <p className="confirm-warning">{ask.warning}</p>}
+      {ask.extra}
       {ask.danger !== undefined && (
         <div className="confirm-danger">
           <p>{ask.danger.description}</p>

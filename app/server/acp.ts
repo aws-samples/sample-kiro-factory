@@ -16,11 +16,20 @@
  * you run this on a machine you care about.
  */
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import * as acp from '@agentclientprotocol/sdk';
+import {
+  KIRO_CLIENT_CAPABILITIES,
+  MCP_READY_MAX_MS,
+  McpReadiness,
+  openExternalUrl,
+  secretParams,
+  secretStore,
+  urlOf,
+} from './hostServices.ts';
 import type { GrantedServer } from './mcp.ts';
 
 export interface TurnRequest {
@@ -67,6 +76,11 @@ export interface TurnRequest {
    * paragraphs into a turn, that it could not find the tools it had been promised.
    */
   onNote?: (text: string) => void;
+  /**
+   * Called with the ACP session id as soon as the session exists, so even a turn
+   * that is aborted or fails knows which kiro-cli session to read credits from.
+   */
+  onSession?: (sessionId: string) => void;
   /** Called with every text chunk the agent produces. */
   onText?: (text: string) => void;
   /**
@@ -83,6 +97,8 @@ export interface TurnResult {
   stopReason: string;
   /** Everything the agent said, concatenated. */
   text: string;
+  /** The ACP session id, when the driver has one. */
+  sessionId?: string;
 }
 
 export interface Driver {
@@ -252,9 +268,14 @@ export class KiroDriver implements Driver {
   async runTurn(req: TurnRequest): Promise<TurnResult> {
     let text = '';
     let stopReason = 'unknown';
+    let sessionId: string | undefined;
 
+    const mcpReady = new McpReadiness();
     const app = acp
       .client({ name: 'loop-canvas' })
+      .onNotification('_kiro/mcp/status', { parse: (p: unknown) => p }, ({ params }) => {
+        mcpReady.update(params);
+      })
       .onRequest('session/request_permission', ({ params }) => {
         const kind = params.toolCall.kind ?? 'other';
         const allowed = ALLOW_ALL_TOOLS || ALLOWED_KINDS.includes(kind);
@@ -269,6 +290,25 @@ export class KiroDriver implements Driver {
         // must never fall through a permission prompt.
         if (!option) return { outcome: { outcome: 'cancelled' as const } };
         return { outcome: { outcome: 'selected' as const, optionId: option.optionId } };
+      })
+      // The host services KAS needs for remote MCP servers behind OAuth. See
+      // hostServices.ts for why a client that leaves these out gets
+      // "Unauthorized" from every such server while kiro-cli chat sails through.
+      .onRequest('_kiro/secret/get', { parse: secretParams }, async ({ params }) => ({
+        value: (await secretStore.get(params.key)) ?? null,
+      }))
+      .onRequest('_kiro/secret/store', { parse: secretParams }, async ({ params }) => {
+        await secretStore.store(params.key, params.value ?? '');
+        return {};
+      })
+      .onRequest('_kiro/secret/delete', { parse: secretParams }, async ({ params }) => {
+        await secretStore.delete(params.key);
+        return {};
+      })
+      .onRequest('_kiro/openExternalUrl', { parse: urlOf }, ({ params }) => {
+        req.onNote?.(`opening browser for sign-in: ${params}`);
+        openExternalUrl(params);
+        return {};
       });
 
     // The default agent serves the loop that changed nothing; any departure -
@@ -281,10 +321,16 @@ export class KiroDriver implements Driver {
     const proc = spawn(
       this.command,
       [
+        // `--v3` selects kiro-cli's current runtime. It matters for remote MCP
+        // servers behind OAuth: the login the operator did interactively is held
+        // by that runtime, and a session started without the flag ran on the
+        // older one, which could not see it and asked for a sign-in nobody was
+        // there to answer. `models.ts` probes the same runtime, for the same
+        // catalogue the loops will run against.
+        '--v3',
         'acp',
-        // The model is a spawn flag rather than a session/set_model call because
-        // every turn is a fresh process anyway - there is no session to switch.
-        ...(req.model !== undefined ? ['--model', req.model] : []),
+        // No `--model` here: `--v3` rejects it and exits. The model is chosen
+        // below with session/set_config_option once the session exists.
         ...(agent !== undefined ? ['--agent', agent] : []),
       ],
       {
@@ -340,10 +386,13 @@ export class KiroDriver implements Driver {
      * A non-zero exit is only an answer when the stream has not already given one:
      * the SDK reports a closed stream too, as "ACP connection closed", which is
      * true and says nothing about why, so the exit code wins the race when it
-     * arrives first. The `finally` below kills the process after every turn and
-     * that exit is by signal, not code, so it does not reject here - and the
-     * promise is marked handled up front because by then nobody is waiting on it.
+     * arrives first. The `finally` below kills the process after every turn. How
+     * that looks depends on the runtime: v2 exits by signal, `--v3` exits with
+     * code 255. Either way it is our own doing, so `killing` is set before the
+     * kill and exits after that point never reject. The promise is marked handled
+     * up front because by then nobody is waiting on it.
      */
+    let killing = false;
     const died = new Promise<never>((_, reject) => {
       proc.on('error', (err: NodeJS.ErrnoException) =>
         reject(
@@ -355,6 +404,7 @@ export class KiroDriver implements Driver {
         ),
       );
       proc.on('exit', (code, signal) => {
+        if (killing) return;
         if (code !== null && code !== 0) reject(new Error(`${this.command} exited with code ${code}`));
         else if (signal !== null && !proc.killed) reject(new Error(`${this.command} was killed by ${signal}`));
       });
@@ -367,16 +417,20 @@ export class KiroDriver implements Driver {
         Readable.toWeb(proc.stdout!) as ReadableStream<Uint8Array>,
       );
       const turn = app.connectWith(stream, async (ctx) => {
-        await ctx.request('initialize', {
+        const init = (await ctx.request('initialize', {
           protocolVersion: acp.PROTOCOL_VERSION,
-          clientCapabilities: {},
-        });
+          clientCapabilities: KIRO_CLIENT_CAPABILITIES,
+        })) as { agentCapabilities?: { sessionCapabilities?: { close?: unknown } } };
+        // `--v3` advertises session/close; v2 answers it with method-not-found.
+        const canClose = init.agentCapabilities?.sessionCapabilities?.close != null;
         // Always empty, both ways round. A trusted turn takes the machine's own
         // config; a scoped turn takes the `mcpServers` written into its generated
         // agent, which is the channel that works for every transport rather than
         // stdio alone. Declaring the same servers here as well would be a second
         // source for one fact, and this is where that fact used to go wrong.
         await ctx.buildSession({ cwd: req.cwd, mcpServers: [] }).withSession(async (session) => {
+          sessionId = session.sessionId;
+          req.onSession?.(session.sessionId);
           /**
            * What each tool call is, by its id, for the length of the turn.
            *
@@ -397,11 +451,42 @@ export class KiroDriver implements Driver {
            */
           const tools = new Map<string, { title: string; kind?: string }>();
 
+          if (req.model !== undefined) {
+            await ctx.request('session/set_config_option', {
+              sessionId: session.sessionId,
+              configId: 'model',
+              value: req.model,
+            });
+          }
+          // Hold the prompt until the MCP servers have connected, so the tool
+          // list the model sees is the one the loop was promised. See
+          // McpReadiness for the race this closes.
+          if (!(await mcpReady.wait(MCP_READY_MAX_MS))) {
+            const pending = mcpReady.pending();
+            req.onNote?.(
+              pending.length > 0
+                ? `MCP servers still connecting after ${MCP_READY_MAX_MS / 1000}s, prompting without them: ${pending.join(', ')}`
+                : `no MCP status from the agent within ${MCP_READY_MAX_MS / 1000}s, prompting anyway`,
+            );
+          }
           session.prompt(req.prompt);
           for (;;) {
             const msg = await session.nextUpdate();
             if (msg.kind === 'stop') {
               stopReason = msg.stopReason;
+              if (canClose) {
+                // Close the session cleanly before the process is killed. Bounded
+                // by a timer so a silent agent cannot hold the turn open, and a
+                // failure here changes nothing: the kill below is the fallback.
+                let timer: NodeJS.Timeout | undefined;
+                await Promise.race([
+                  ctx.request('session/close', { sessionId: session.sessionId }).catch(() => undefined),
+                  new Promise<void>((resolve) => {
+                    timer = setTimeout(resolve, 2_000);
+                  }),
+                ]);
+                clearTimeout(timer);
+              }
               return;
             }
             const u = msg.update;
@@ -470,10 +555,11 @@ export class KiroDriver implements Driver {
       });
     } finally {
       // Always kill the subprocess so orphans never stack up.
+      killing = true;
       proc.kill('SIGTERM');
     }
 
-    return { stopReason, text };
+    return { stopReason, text, ...(sessionId !== undefined ? { sessionId } : {}) };
   }
 }
 
@@ -492,7 +578,9 @@ export class EchoDriver implements Driver {
   async runTurn(req: TurnRequest): Promise<TurnResult> {
     const text = this.reply(req);
     req.onText?.(text);
-    return { stopReason: 'end_turn', text };
+    const sessionId = `echo-${randomUUID()}`;
+    req.onSession?.(sessionId);
+    return { stopReason: 'end_turn', text, sessionId };
   }
 }
 

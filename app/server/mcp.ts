@@ -203,6 +203,18 @@ export const NAME_ONLY = new RegExp(`^${NAME}$`);
 export const RESERVED = new Set(['input', 'output', 'project', 'loop']);
 
 /**
+ * The reserved words of a *remote* loop's prompt. `@input`, `@output` and
+ * `@loop` mean what they mean locally, rewritten to S3 paths by the direction
+ * builder. `@project` is gone - there is no checkout - and two words take the
+ * place of what a remote node does have: `@environment`, the cluster's own
+ * folder on the flock (its queues, every node's scratch, anything uploaded
+ * there), and `@browser`, the headless browser the flock gives a node when the
+ * loop's browser flag is on. `server/flock/validate.ts` and the panel's token
+ * menu both read this set, so the menu never offers what Start would refuse.
+ */
+export const REMOTE_RESERVED = new Set(['input', 'output', 'loop', 'environment', 'browser', 'deploy']);
+
+/**
  * The `@tokens` a prompt uses, lowercased.
  *
  * Reserved names are excluded, see above. Everything else is a candidate to be

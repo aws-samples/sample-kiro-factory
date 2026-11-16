@@ -58,18 +58,37 @@ export function discoverModels(command: string): Promise<ModelCatalog> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      proc.kill('SIGTERM');
       if (catalog.failed === true) {
         // Said once, where it can be found later. A failure that leaves no trace
         // is the reason a missing picker is a mystery rather than a bug report.
         console.error(`[models] discovery failed: ${catalog.reason}`);
       }
       resolve(catalog);
+      // Close the session first when the agent supports it, then kill. The
+      // catalogue is already resolved, so this wait delays nothing; it is bounded
+      // by a timer and the kill is the fallback.
+      if (canClose && sessionId !== undefined) {
+        const closed = new Promise<void>((done) => {
+          closeDone = done;
+        });
+        request(3, 'session/close', { sessionId });
+        const t = setTimeout(() => closeDone?.(), 2_000);
+        void closed.then(() => {
+          clearTimeout(t);
+          proc.kill('SIGTERM');
+        });
+      } else {
+        proc.kill('SIGTERM');
+      }
     };
+    let canClose = false;
+    let sessionId: string | undefined;
+    let closeDone: (() => void) | undefined;
 
     // In the temp directory, not any factory's baseDir: the probe wants the
     // catalogue, not whatever workspace agents and steering a project carries.
-    const proc = spawn(command, ['acp'], { stdio: ['pipe', 'pipe', 'ignore'], cwd: os.tmpdir() });
+    // `--v3` matches the runtime the loops run under - see `KiroDriver.runTurn`.
+    const proc = spawn(command, ['--v3', 'acp'], { stdio: ['pipe', 'pipe', 'ignore'], cwd: os.tmpdir() });
     proc.on('error', (err) => finish(failure(`${command} would not start: ${err.message}`)));
     proc.on('exit', (code) => finish(failure(`${command} exited (code ${code ?? '?'}) before answering`)));
 
@@ -102,6 +121,7 @@ export function discoverModels(command: string): Promise<ModelCatalog> {
       } catch {
         return;
       }
+      if (msg.id === 3) return closeDone?.();
       if (msg.id !== 1 && msg.id !== 2) return;
       if (msg.error !== undefined) {
         const detail =
@@ -109,8 +129,13 @@ export function discoverModels(command: string): Promise<ModelCatalog> {
         return finish(failure(`${msg.id === 1 ? 'initialize' : 'session/new'} failed: ${detail}`));
       }
       if (msg.id === 1) {
+        const caps = (msg.result as { agentCapabilities?: { sessionCapabilities?: { close?: unknown } } } | undefined)
+          ?.agentCapabilities;
+        canClose = caps?.sessionCapabilities?.close != null;
         request(2, 'session/new', { cwd: os.tmpdir(), mcpServers: [] });
       } else {
+        const sid = (msg.result as { sessionId?: unknown } | undefined)?.sessionId;
+        if (typeof sid === 'string') sessionId = sid;
         finish(parseCatalog(msg.result));
       }
     });
@@ -120,87 +145,55 @@ export function discoverModels(command: string): Promise<ModelCatalog> {
 }
 
 /**
- * The model catalogue from a `session/new` response, defensively.
+ * The model catalogue of a `session/new` response, defensively. Accepts the v2
+ * `models` block, then the `--v3` `configOptions` entry with id `model`.
  *
- * kiro-cli has shipped this in two shapes. Newer builds carry it in `configOptions`:
- * an array of `select` controls, one of which has `id: "model"`, whose `options` are
- * `{ value, name, description }` and whose `currentValue` is the default. Older builds
- * put it in a top-level `models` block as `{ availableModels: [{ modelId, name,
- * description }], currentModelId }`. Both are read here, `configOptions` first, so the
- * probe works regardless of which build is installed.
- *
- * A response carrying neither shape is a failure rather than an empty catalogue: the
- * session opened but did not say what it can run, so the answer is unknown. A model
- * control that is present and lists nothing is a real answer, not a failure - the
- * subscription offers nothing to choose between.
+ * No block, or one that is not shaped like a catalogue, is a failure rather than an
+ * empty catalogue: the session opened but did not say what it can run, so the answer
+ * is unknown. An `availableModels` that is present and empty is not a failure - that
+ * is a real answer, and it means this subscription offers nothing to choose between.
  */
-function parseCatalog(result: unknown): ModelCatalog {
-  const fromConfig = parseConfigOptions(result);
-  if (fromConfig !== undefined) return fromConfig;
+export function parseCatalog(result: unknown): ModelCatalog {
+  const r = (result ?? null) as { models?: unknown; configOptions?: unknown } | null;
+  const models = r?.models as { currentModelId?: unknown; availableModels?: unknown } | undefined;
+  if (models && Array.isArray(models.availableModels)) {
+    const list: ModelInfo[] = [];
+    for (const m of models.availableModels) {
+      const raw = m as { modelId?: unknown; name?: unknown; description?: unknown };
+      if (typeof raw.modelId !== 'string' || raw.modelId.length === 0) continue;
+      list.push({
+        id: raw.modelId,
+        name: typeof raw.name === 'string' && raw.name.length > 0 ? raw.name : raw.modelId,
+        ...(typeof raw.description === 'string' ? { description: raw.description } : {}),
+      });
+    }
+    return {
+      models: list,
+      ...(typeof models.currentModelId === 'string' ? { defaultId: models.currentModelId } : {}),
+    };
+  }
 
-  const fromModels = parseModelsBlock(result);
-  if (fromModels !== undefined) return fromModels;
-
+  // `--v3` sessions report models as a config option instead of a `models` block.
+  if (Array.isArray(r?.configOptions)) {
+    const opt = (r.configOptions as Array<Record<string, unknown>>).find(
+      (o) => o?.id === 'model' || o?.category === 'model',
+    );
+    if (opt && Array.isArray(opt.options)) {
+      const list: ModelInfo[] = [];
+      for (const m of opt.options) {
+        const raw = m as { value?: unknown; name?: unknown; description?: unknown };
+        if (typeof raw.value !== 'string' || raw.value.length === 0) continue;
+        list.push({
+          id: raw.value,
+          name: typeof raw.name === 'string' && raw.name.length > 0 ? raw.name : raw.value,
+          ...(typeof raw.description === 'string' ? { description: raw.description } : {}),
+        });
+      }
+      return {
+        models: list,
+        ...(typeof opt.currentValue === 'string' ? { defaultId: opt.currentValue } : {}),
+      };
+    }
+  }
   return { models: [], failed: true, reason: 'session/new returned no model catalogue' };
-}
-
-/**
- * The newer shape: a `model` entry inside `configOptions`.
- *
- * Returns `undefined` when there is no such entry, so the caller can fall back to the
- * older shape rather than report a failure. A present-but-empty `options` is a real,
- * non-failing answer.
- */
-function parseConfigOptions(result: unknown): ModelCatalog | undefined {
-  const configOptions = (result as { configOptions?: unknown } | null)?.configOptions;
-  if (!Array.isArray(configOptions)) return undefined;
-
-  const control = configOptions.find(
-    (o): o is { id?: unknown; currentValue?: unknown; options?: unknown } =>
-      typeof o === 'object' && o !== null && (o as { id?: unknown }).id === 'model',
-  );
-  if (!control || !Array.isArray(control.options)) return undefined;
-
-  const list: ModelInfo[] = [];
-  for (const o of control.options) {
-    const raw = o as { value?: unknown; name?: unknown; description?: unknown };
-    if (typeof raw.value !== 'string' || raw.value.length === 0) continue;
-    list.push({
-      id: raw.value,
-      name: typeof raw.name === 'string' && raw.name.length > 0 ? raw.name : raw.value,
-      ...(typeof raw.description === 'string' ? { description: raw.description } : {}),
-    });
-  }
-  return {
-    models: list,
-    ...(typeof control.currentValue === 'string' ? { defaultId: control.currentValue } : {}),
-  };
-}
-
-/**
- * The older shape: a top-level `models` block with `availableModels`.
- *
- * Returns `undefined` when the block is absent or not shaped like a catalogue, so the
- * caller reports a failure only once neither shape matched.
- */
-function parseModelsBlock(result: unknown): ModelCatalog | undefined {
-  const models = (result as { models?: unknown } | null)?.models as
-    | { currentModelId?: unknown; availableModels?: unknown }
-    | undefined;
-  if (!models || !Array.isArray(models.availableModels)) return undefined;
-
-  const list: ModelInfo[] = [];
-  for (const m of models.availableModels) {
-    const raw = m as { modelId?: unknown; name?: unknown; description?: unknown };
-    if (typeof raw.modelId !== 'string' || raw.modelId.length === 0) continue;
-    list.push({
-      id: raw.modelId,
-      name: typeof raw.name === 'string' && raw.name.length > 0 ? raw.name : raw.modelId,
-      ...(typeof raw.description === 'string' ? { description: raw.description } : {}),
-    });
-  }
-  return {
-    models: list,
-    ...(typeof models.currentModelId === 'string' ? { defaultId: models.currentModelId } : {}),
-  };
 }

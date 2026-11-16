@@ -126,6 +126,7 @@ import {
   ownDirFor,
   wiresOf,
 } from './factory.ts';
+import { appendUsage, readSessionCredits, readSessionCreditsWithRetry, type UsageEntry } from './usage.ts';
 import { listMcpServers, serversNamedIn } from './mcp.ts';
 import { listSkills, listSteeringFiles } from './resources.ts';
 import {
@@ -178,6 +179,14 @@ export interface LoopStatus {
   pausedFor?: 'work' | 'interval';
   iteration: number;
   /**
+   * Credits this session spent in the current server run, from kiro-cli's own
+   * metering. Absent until an iteration has finished. A server restart starts it
+   * over: earlier runs are in the usage ledger, not here.
+   */
+  credits?: number;
+  /** How many finished iterations of this run carried no metering. */
+  unmetered?: number;
+  /**
    * The loop's last stop was its own: the agent confirmed there was nothing left
    * to do. Carried until the next start, so the canvas can say *why* a box is
    * stopped for as long as it stays that way - a factory someone walks back to
@@ -206,6 +215,32 @@ export interface LoopStatus {
    * is always the one the runner will act on.
    */
   nextTurnAt?: number;
+  /**
+   * Present on a remote loop's members only: the flock cluster behind the card,
+   * and how the bridge to it is doing. `state` above is derived from
+   * `remote.clusterState` so every existing consumer keeps working; the rest is
+   * for the remote bar and the banner. See server/flock/cluster.ts.
+   */
+  remote?: RemoteStatus;
+}
+
+/** What a remote loop's status frame carries beyond the local shape. */
+export interface RemoteStatus {
+  clusterState: 'stopped' | 'starting' | 'running' | 'stopping' | 'paused' | 'gone' | 'unknown';
+  stateReason?: string;
+  lastError?: string;
+  signedIn: boolean;
+  sync: 'live' | 'catching-up' | 'signed-out' | 'unreachable';
+  lastSyncAt?: string;
+  lastSeenAt?: string;
+  infraCostUsd?: number;
+  uiUrl: string;
+  clusterId: string;
+  connection: string;
+  inboxPending?: number;
+  outboxPending?: number;
+  /** Set when the flock could not be used at all: missing connection, no queue routes. */
+  problem?: string;
 }
 
 /** One line of a loop's output, as the UI receives it. */
@@ -227,6 +262,8 @@ export interface OutputLine {
    */
   kind: 'text' | 'tool' | 'system' | 'iteration' | 'iteration-steered' | 'user';
   text: string;
+  /** Which iteration an `iteration` or `iteration-steered` marker opens. */
+  iteration?: number;
 }
 
 /**
@@ -322,6 +359,12 @@ export class Runner extends EventEmitter {
 
   private state: LoopState = 'stopped';
   private iteration = 0;
+  /** Credits spent this server run, summed over finished iterations. */
+  private credits = 0;
+  /** Finished iterations of this run that carried no metering. */
+  private unmetered = 0;
+  /** Which server run this runner belongs to, for the usage ledger. */
+  private readonly runId: string;
   private stopping = false;
   /**
    * Which run is the current one.
@@ -451,8 +494,11 @@ export class Runner extends EventEmitter {
     driver: Driver;
     /** Which member of a cluster. Omit for a plain loop. */
     member?: number;
+    /** Which server run this is, written into every usage ledger line. */
+    runId: string;
   }) {
     super();
+    this.runId = opts.runId;
     this.loopId = opts.loopId;
     this.factory = opts.factory;
     this.cwd = opts.cwd;
@@ -471,6 +517,11 @@ export class Runner extends EventEmitter {
       ...(this.member !== undefined ? { member: this.member } : {}),
       state: this.state,
       iteration: this.iteration,
+      // Only once something has finished, like the fields below: a runner that
+      // has not completed a turn has no cost to report.
+      ...(this.credits > 0 || this.unmetered > 0
+        ? { credits: this.credits, unmetered: this.unmetered }
+        : {}),
       // Spread-in rather than always present, so the wire format only carries
       // these while they apply and older readers see the shape they know.
       ...(this.state === 'paused' && this.pausedFor !== undefined
@@ -730,18 +781,30 @@ export class Runner extends EventEmitter {
    * The chunk is still emitted as it arrives, so the UI streams. The client joins
    * consecutive text chunks the same way this buffer does.
    */
-  private say(kind: OutputLine['kind'], text: string): void {
+  private say(kind: OutputLine['kind'], text: string, iteration?: number): void {
     const last = this.output[this.output.length - 1];
     if (kind === 'text' && last?.kind === 'text') {
       last.text += text;
     } else {
-      this.output.push({ loop: this.key, ts: new Date().toISOString(), kind, text });
+      this.output.push({
+        loop: this.key,
+        ts: new Date().toISOString(),
+        kind,
+        text,
+        ...(iteration !== undefined ? { iteration } : {}),
+      });
       if (this.output.length > OUTPUT_LIMIT) this.output.splice(0, this.output.length - OUTPUT_LIMIT);
     }
     // Keyed by the member rather than the loop, so a cluster's members are
     // separate streams the panel can switch between. Interleaving five agents'
     // narration into one buffer would merge their `text` blocks into each other.
-    this.emit('output', { loop: this.key, ts: new Date().toISOString(), kind, text });
+    this.emit('output', {
+      loop: this.key,
+      ts: new Date().toISOString(),
+      kind,
+      text,
+      ...(iteration !== undefined ? { iteration } : {}),
+    });
   }
 
   private async run(generation: number): Promise<void> {
@@ -1344,9 +1407,13 @@ export class Runner extends EventEmitter {
     const prompt = steered.length === 0 ? built : built + steerSection(steered, interrupted);
 
     if (steered.length > 0) {
-      this.say('iteration-steered', `Iteration ${this.iteration} - answering your message`);
+      this.say(
+        'iteration-steered',
+        `Iteration ${this.iteration} - answering your message`,
+        this.iteration,
+      );
     } else {
-      this.say('iteration', `Iteration ${this.iteration}`);
+      this.say('iteration', `Iteration ${this.iteration}`, this.iteration);
     }
     // One controller per turn, so a force stop kills exactly the turn in flight.
     // Cleared on the way out only if still ours: a force stop followed by a fresh
@@ -1355,6 +1422,9 @@ export class Runner extends EventEmitter {
     this.turnAbort = abort;
     // This turn's words alone, for the auto-stop scan - see the doc comment.
     let turnText = '';
+    const startedAt = new Date();
+    let sessionId: string | undefined;
+    let stopReason = 'error';
     try {
       const result = await this.driver.runTurn({
         // The point of the whole split: the agent works in its own checkout
@@ -1365,6 +1435,11 @@ export class Runner extends EventEmitter {
         ...(granted !== undefined ? { mcp: granted } : {}),
         ...(loop.tools !== undefined ? { tools: loop.tools } : {}),
         ...(loop.model !== undefined ? { model: loop.model } : {}),
+        // Known before the turn ends, so a turn that is aborted or throws can
+        // still be costed from its session file.
+        onSession: (id) => {
+          sessionId = id;
+        },
         onText: (text) => {
           turnText += text;
           this.say('text', text);
@@ -1381,14 +1456,69 @@ export class Runner extends EventEmitter {
         // loop whose tools failed to load has to be able to say so.
         onNote: (text) => this.say('system', text),
       });
+      stopReason = result.stopReason;
+      sessionId ??= result.sessionId;
       if (result.stopReason !== 'end_turn') this.say('system', `turn ended: ${result.stopReason}`);
     } finally {
       if (this.turnAbort === abort) this.turnAbort = undefined;
+      const aborted = abort.signal.aborted;
+      await this.recordUsage(loop, startedAt, sessionId, aborted ? 'aborted' : stopReason, aborted);
     }
     await this.broadcast(loop, turnText);
     return turnText;
   }
 
+  /**
+   * Cost the turn that just ended and write its ledger line.
+   *
+   * Runs on every exit from a turn, including a failed or aborted one, because an
+   * interrupted turn still shows up in the log and the history should say it was
+   * not metered rather than leave a gap. Never throws: cost is bookkeeping, and
+   * losing a line must not lose the iteration.
+   *
+   * An aborted turn is read once instead of with the retry. A force stop is
+   * waiting on this, and a killed session usually has no metering to wait for.
+   */
+  private async recordUsage(
+    loop: Loop,
+    startedAt: Date,
+    sessionId: string | undefined,
+    stopReason: string,
+    aborted: boolean,
+  ): Promise<void> {
+    try {
+      // The echo driver makes no model call, so there is no session file to read.
+      const metered = sessionId !== undefined && this.driver.name !== 'echo';
+      const credits = !metered
+        ? null
+        : aborted
+          ? await readSessionCredits(sessionId)
+          : await readSessionCreditsWithRetry(sessionId);
+      if (credits !== null) this.credits += credits;
+      else this.unmetered += 1;
+      const now = Date.now();
+      const entry: UsageEntry = {
+        ts: new Date(now).toISOString(),
+        runId: this.runId,
+        key: this.key,
+        loopId: this.loopId,
+        loopName: loop.name,
+        iteration: this.iteration,
+        ...(sessionId !== undefined ? { sessionId } : {}),
+        ...(credits !== null ? { credits } : {}),
+        unmetered: credits === null,
+        startedAt: startedAt.toISOString(),
+        durationMs: now - startedAt.getTime(),
+        stopReason,
+        totalCredits: this.credits,
+      };
+      await appendUsage(this.home, entry);
+      this.emit('usage', entry);
+      this.emit('status', this.status());
+    } catch (err) {
+      console.error(`usage recording failed for ${this.key}:`, err);
+    }
+  }
   /* ------------------------------------------------------------------ flock */
 
   /**

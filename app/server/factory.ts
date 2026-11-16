@@ -19,6 +19,7 @@
  * There is no validator. A document either parses or it does not; anything past
  * that is a judgement about your design that a program has no business making.
  */
+import { createHash } from 'node:crypto';
 import * as fsp from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import * as os from 'node:os';
@@ -244,9 +245,88 @@ export interface Loop {
    * the component runs for exactly that reason.
    */
   worktree?: boolean;
+  /**
+   * Run this component on a Kiro Flock the operator already has, rather than as
+   * subprocesses on this machine - a remote loop.
+   *
+   * Absent means local, which is what every document written before this field
+   * existed means by not having it. Present means the component is a flock
+   * cluster: `cluster` is forced to `{mode:'fixed', comms:'flock'}`, `size` is
+   * the node count with **no local ceiling** (the flock enforces its own), the
+   * algorithm is `remote.algorithm` (amorphous unless said otherwise), and
+   * `tools`, `mcp`, `worktree`, `autoStop` and `stopAfterIterations` are
+   * dropped, because none of them exist on the other side. See `RemoteLoop`
+   * and `server/flock/`.
+   */
+  remote?: RemoteLoop;
   x: number;
   y: number;
 }
+
+/**
+ * Where and how a remote loop runs. Only the intent that travels with the
+ * document: the connection is named by id, never by URL or credential, and the
+ * flock cluster id is *derived* (`remoteClusterId`) rather than stored, so an
+ * imported copy of this factory gets its own cluster and never adopts another's.
+ */
+export interface RemoteLoop {
+  /** The one remote kind there is. Reserved for later kinds. */
+  kind: 'flock';
+  /**
+   * Id of a connection in `~/.kirofactory/flocks.json`. Opaque and machine-local:
+   * an id with no matching connection parses fine and makes the loop unstartable
+   * ("connection not found") rather than invalid.
+   */
+  connection: string;
+  /**
+   * How the nodes talk to each other - the flock's coordination algorithm.
+   * `amorphous` (the default, left out of the document) is a ring where each
+   * node reads its neighbours within `neighbourRadius`; `mesh` is every node
+   * reading every other; `swarm` is each node reading the `swarmK` most recently
+   * active ones; `single` is no peers at all, so `size` lone agents each work
+   * the direction on their own - fire and forget, N times.
+   */
+  algorithm?: RemoteAlgorithm;
+  /** Radius of the amorphous ring. Default 1. Clamped to `1..floor(size/2)`. */
+  neighbourRadius?: number;
+  /** Peers a swarm node reads. Only with `algorithm: 'swarm'`; clamped to `1..size-1`. */
+  swarmK?: number;
+  /** Fargate task size. Default `medium`. */
+  taskSize?: RemoteTaskSize;
+  /** Maps to the flock's `browserAutomation`. Default false. */
+  browser?: boolean;
+  /** Maps to the flock's `trustDeploy`: the nodes may `cdk deploy` into the flock account. Default false. */
+  trustDeploy?: boolean;
+  /** Maps to the flock's `selfOptimizing`: nodes append reflections to their own directive each turn. Default false. */
+  selfOptimizing?: boolean;
+}
+
+export type RemoteTaskSize = 'small' | 'medium' | 'large' | 'xlarge';
+export const REMOTE_TASK_SIZES: readonly RemoteTaskSize[] = ['small', 'medium', 'large', 'xlarge'];
+
+export type RemoteAlgorithm = 'amorphous' | 'mesh' | 'swarm' | 'single';
+export const REMOTE_ALGORITHMS: readonly RemoteAlgorithm[] = ['amorphous', 'mesh', 'swarm', 'single'];
+
+/**
+ * The fewest nodes a remote cluster may have. Two, like a local cluster, for
+ * every algorithm whose nodes read each other: one node with nobody to read is
+ * a loop dressed as several. `single` has no peers by definition, so one is an
+ * honest size there, and more than one is that many independent runs.
+ */
+export function remoteMinSize(algorithm: RemoteAlgorithm | undefined): number {
+  return algorithm === 'single' ? 1 : CLUSTER_MIN;
+}
+
+/** What the flock's `swarmK` falls back to when the document names none: the flock's own default, kept inside `1..size-1`. */
+export function defaultSwarmK(size: number): number {
+  return Math.max(1, Math.min(4, size - 1));
+}
+
+/** The flock caps `loopIntervalSeconds` here; `validateConfig` rejects more. */
+export const REMOTE_INTERVAL_MAX = 3600;
+
+/** Node count a remote loop gets when the document names none. */
+export const REMOTE_DEFAULT_SIZE = 3;
 
 /**
  * A loop cluster: one component on the canvas, several agent sessions behind it.
@@ -480,6 +560,41 @@ export interface Factory {
   parameters?: Parameter[];
   loops: Loop[];
   wires: Wire[];
+  /**
+   * Where this factory's design came from, when it came from the library.
+   *
+   * The slug of the entry it was taken out of. A take-out is a copy - see the route
+   * - and without this the copy forgets which entry it copied, so an edit to the
+   * entry afterwards has no way back onto an open canvas except a second take-out
+   * as a second tab. With it, the shell can offer to read the entry again into this
+   * factory. Absent on a factory drawn by hand, imported or opened from a folder,
+   * which is every document written before this field existed.
+   */
+  source?: { library: string };
+  /**
+   * The flock deployment group every remote loop of this factory runs in
+   * (`everforgeGroup` on the flock): the clusters share `environment/<group>/`,
+   * which is how they collaborate, and a deployer's records go to
+   * `environment/<group>/deployed/`. A slug of the factory's name when first
+   * written, then kept, so a rename does not move running clusters; the factory
+   * id when the name has no usable characters. Lowercase letters, digits and
+   * hyphens, 2 to 32 characters, the flock's rule for ids.
+   */
+  remoteGroup: string;
+}
+
+/** The flock's cluster-id rule, which deployment groups follow. */
+const GROUP_RE = /^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$/;
+
+/** The group a factory's remote loops run in, from its name: see `Factory.remoteGroup`. */
+export function groupSlug(name: string, factoryId: string): string {
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32)
+    .replace(/-+$/g, '');
+  return GROUP_RE.test(slug) ? slug : factoryId;
 }
 
 /** What a factory looks like in the registry: enough to list it in a tab. */
@@ -616,6 +731,21 @@ export interface Defaults {
  * `defaults` supply identity and location for a document that has none, which is
  * every document written before those fields existed and every hand-written one.
  */
+/**
+ * A document from outside the app with `trustDeploy` taken out of every loop.
+ * The flag lets a remote cluster create resources in the flock's account, so it
+ * is honoured only when the operator ticked it here: an imported file, or a file
+ * rewritten on disk by something else and read back, starts with it off (PCSR F22).
+ */
+export function withoutTrustDeploy(input: unknown): unknown {
+  if (!isObject(input) || !Array.isArray(input.loops)) return input;
+  const loops = input.loops.map((l) => {
+    if (!isObject(l) || !isObject(l.remote) || !('trustDeploy' in l.remote)) return l;
+    const { trustDeploy: _dropped, ...remote } = l.remote;
+    return { ...l, remote };
+  });
+  return { ...input, loops };
+}
 export function parse(input: unknown, defaults: Defaults): Factory {
   const raw = isObject(input) ? input : {};
 
@@ -690,45 +820,117 @@ export function parse(input: unknown, defaults: Defaults): Factory {
           ? Math.round(l.intervalSeconds)
           : undefined;
 
+      /*
+       * The remote marker, or nothing at all.
+       *
+       * Present only when it names a connection: a `remote: {}` or a `remote`
+       * with the wrong kind is not a remote loop, it is noise from a hand edit
+       * and the loop opens as local. Remote changes the shape of everything
+       * below - the cluster is forced, several fields are dropped - so it is
+       * resolved first.
+       */
+      const rawRemote = isObject(l.remote) ? l.remote : undefined;
+      const remote: RemoteLoop | undefined =
+        rawRemote !== undefined && rawRemote.kind === 'flock' && typeof rawRemote.connection === 'string'
+          // An empty connection is still a remote loop - one from the library,
+          // whose connection was blanked on save - just an unstartable one until
+          // the operator picks a connection for it.
+          ? { kind: 'flock', connection: rawRemote.connection }
+          : undefined;
+
       const rawCluster = isObject(l.cluster) ? l.cluster : undefined;
-      const cluster: Cluster | undefined =
-        rawCluster === undefined
-          ? undefined
-          : {
-              mode: CLUSTER_MODES.includes(rawCluster.mode as ClusterMode)
-                ? (rawCluster.mode as ClusterMode)
-                : 'fixed',
-              size: Math.min(
-                CLUSTER_MAX,
-                Math.max(CLUSTER_MIN, Math.round(num(rawCluster.size, CLUSTER_MIN))),
-              ),
-              comms: CLUSTER_COMMS.includes(rawCluster.comms as ClusterComms)
-                ? (rawCluster.comms as ClusterComms)
-                : 'isolated',
-            };
+      let cluster: Cluster | undefined;
+      if (remote !== undefined) {
+        /*
+         * A remote loop is always a cluster, always fixed, always flock comms,
+         * and has no local ceiling: its members are Fargate tasks on the other
+         * side, not subprocesses here. The flock's own `validateConfig` decides
+         * how many it will run, and that answer is shown verbatim at start.
+         * Only CLUSTER_MIN still applies, for the same reason it applies to a
+         * local cluster: one node is a loop dressed as several.
+         */
+        const algorithm = REMOTE_ALGORITHMS.includes(rawRemote?.algorithm as RemoteAlgorithm)
+          ? (rawRemote?.algorithm as RemoteAlgorithm)
+          : 'amorphous';
+        // The default is the default: left out of the document, so a document
+        // written before the field existed and one that picked amorphous read
+        // the same.
+        if (algorithm !== 'amorphous') remote.algorithm = algorithm;
+        cluster = {
+          mode: 'fixed',
+          size: Math.max(remoteMinSize(algorithm), Math.round(num(rawCluster?.size, REMOTE_DEFAULT_SIZE))),
+          comms: 'flock',
+        };
+        const radius = Math.round(num(rawRemote?.neighbourRadius, 1));
+        const maxRadius = Math.max(1, Math.floor(cluster.size / 2));
+        remote.neighbourRadius = Math.min(maxRadius, Math.max(1, radius));
+        // Only a swarm carries K: the flock ignores it otherwise, and carrying a
+        // stale one would make two documents differ for no reason.
+        if (algorithm === 'swarm') {
+          const k = Math.round(num(rawRemote?.swarmK, defaultSwarmK(cluster.size)));
+          remote.swarmK = Math.min(Math.max(1, cluster.size - 1), Math.max(1, k));
+        }
+        if (REMOTE_TASK_SIZES.includes(rawRemote?.taskSize as RemoteTaskSize)) {
+          remote.taskSize = rawRemote?.taskSize as RemoteTaskSize;
+        }
+        if (bool(rawRemote?.browser, false)) remote.browser = true;
+        if (bool(rawRemote?.trustDeploy, false)) remote.trustDeploy = true;
+        if (bool(rawRemote?.selfOptimizing, false)) remote.selfOptimizing = true;
+      } else if (rawCluster !== undefined) {
+        cluster = {
+          mode: CLUSTER_MODES.includes(rawCluster.mode as ClusterMode)
+            ? (rawCluster.mode as ClusterMode)
+            : 'fixed',
+          size: Math.min(
+            CLUSTER_MAX,
+            Math.max(CLUSTER_MIN, Math.round(num(rawCluster.size, CLUSTER_MIN))),
+          ),
+          comms: CLUSTER_COMMS.includes(rawCluster.comms as ClusterComms)
+            ? (rawCluster.comms as ClusterComms)
+            : 'isolated',
+        };
+      }
+
+      // A remote loop cannot run the two modes that need a per-session count or
+      // the agent's own "done" handshake: the flock has neither. They resolve to
+      // "run forever" there, and the fields are not carried.
+      const remoteAutoStop = remote === undefined ? autoStop : false;
+      const remoteAfterIterations = remote === undefined ? afterIterations : undefined;
+      const remoteAutoPause = remote === undefined
+        ? autoPause
+        : bool(l.autoPause, false) && afterHours === undefined;
+      const remoteInterval = remote === undefined || intervalSeconds === undefined
+        ? intervalSeconds
+        : Math.min(REMOTE_INTERVAL_MAX, intervalSeconds);
 
       return {
         id: str(l.id, `loop-${i + 1}`),
         name: str(l.name, str(l.id, `Loop ${i + 1}`)),
         prompt: str(l.prompt, ''),
-        autoPause,
-        autoStop,
-        ...(afterIterations !== undefined ? { stopAfterIterations: afterIterations } : {}),
+        autoPause: remoteAutoPause,
+        autoStop: remoteAutoStop,
+        ...(remoteAfterIterations !== undefined ? { stopAfterIterations: remoteAfterIterations } : {}),
         ...(afterHours !== undefined ? { stopAfterHours: afterHours } : {}),
         disabled: bool(l.disabled, false),
         // Absent means unrestricted and default model, matching every document
         // written before these fields existed. Spread rather than set to undefined,
         // so a document without them round-trips without the keys appearing.
-        ...(Array.isArray(l.mcp) ? { mcp: l.mcp.filter((s): s is string => typeof s === 'string') } : {}),
-        ...(Array.isArray(l.tools)
+        // A remote loop never carries `mcp`, `tools` or `worktree`: nothing on the
+        // flock reads them, and a field that is read by nobody is a lie waiting
+        // to be believed.
+        ...(remote === undefined && Array.isArray(l.mcp)
+          ? { mcp: l.mcp.filter((s): s is string => typeof s === 'string') }
+          : {}),
+        ...(remote === undefined && Array.isArray(l.tools)
           ? { tools: l.tools.filter((s): s is string => typeof s === 'string') }
           : {}),
         ...(typeof l.model === 'string' && l.model.length > 0 ? { model: l.model } : {}),
-        ...(intervalSeconds !== undefined ? { intervalSeconds } : {}),
+        ...(remoteInterval !== undefined ? { intervalSeconds: remoteInterval } : {}),
         ...(cluster !== undefined ? { cluster } : {}),
         // True or absent, never false: an untouched document round-trips without
         // the key, and one that turned the setting off goes back to saying nothing.
-        ...(bool(l.worktree, false) ? { worktree: true } : {}),
+        ...(remote === undefined && bool(l.worktree, false) ? { worktree: true } : {}),
+        ...(remote !== undefined ? { remote } : {}),
         x: num(l.x, 80 + (i % 4) * 260),
         y: num(l.y, 80 + Math.floor(i / 4) * 200),
       };
@@ -801,21 +1003,53 @@ export function parse(input: unknown, defaults: Defaults): Factory {
 
   const parameters = parseParameters(raw.parameters);
 
+  // The library slug this came from, if any. Only the shape is checked here; whether
+  // the entry still exists is the reload route's question, asked when it matters.
+  const source =
+    isObject(raw.source) && typeof raw.source.library === 'string' && raw.source.library.trim().length > 0
+      ? { library: raw.source.library.trim() }
+      : undefined;
+
+  const id = str(raw.id, defaults.id);
+  const name = str(raw.name, defaults.name);
+  // Kept once written: a document that has it keeps it through renames; one
+  // that lacks it (written before the field existed) gets the slug of its
+  // current name, which the next save persists.
+  const remoteGroup = typeof raw.remoteGroup === 'string' && GROUP_RE.test(raw.remoteGroup) ? raw.remoteGroup : groupSlug(name, id);
   return {
     kirofactory: FORMAT,
-    id: str(raw.id, defaults.id),
-    name: str(raw.name, defaults.name),
+    id,
+    name,
+    remoteGroup,
     // Resolved, so a relative path in a hand-edited or imported file cannot make
     // the workspace depend on where the server happened to be started.
     baseDir: path.resolve(str(raw.baseDir, defaults.baseDir)),
     ...(parameters !== undefined ? { parameters } : {}),
     loops,
     wires,
+    ...(source !== undefined ? { source } : {}),
   };
 }
 
 export function empty(defaults: Defaults): Factory {
   return parse({}, defaults);
+}
+
+/**
+ * The flock cluster id a remote loop runs as: `kf-` plus eight hex characters of
+ * `sha256(connectionId:factoryId:loopId)`.
+ *
+ * Derived, never stored. The three inputs are exactly the three things that make
+ * "this loop on this flock" a distinct cluster: a second factory with the same
+ * loop ids gets its own clusters, a loop pointed at a second connection gets a
+ * fresh cluster there rather than driving the first one blind, and a restarted
+ * factory recomputes the same id and finds its cluster again. Fits the flock's
+ * `^[a-z0-9][a-z0-9_-]{0,30}[a-z0-9]$` and cannot collide with a hand-named
+ * cluster unless somebody deliberately names one `kf-<hex>`.
+ */
+export function remoteClusterId(connectionId: string, factoryId: string, loopId: string): string {
+  const digest = createHash('sha256').update(`${connectionId}:${factoryId}:${loopId}`).digest('hex');
+  return `kf-${digest.slice(0, 8)}`;
 }
 
 /** The document's path for a given base directory. */
@@ -845,7 +1079,9 @@ export async function load(baseDir: string, defaults: Defaults): Promise<Factory
   } catch (err) {
     throw new DocumentError(`${file} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
   }
-  return parse(raw, defaults);
+  // The folder the document sits in is the factory's directory. A `baseDir` in the
+  // file is a path on whichever machine wrote it, so it is never believed.
+  return parse(isObject(raw) ? { ...raw, baseDir } : raw, { ...defaults, baseDir });
 }
 
 /**
@@ -863,7 +1099,10 @@ export async function save(factory: Factory): Promise<void> {
   const file = docPath(factory.baseDir);
   await fsp.mkdir(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp`;
-  await fsp.writeFile(tmp, `${JSON.stringify(factory, null, 2)}\n`, 'utf8');
+  // `baseDir` is not written: the document's own location says where the factory
+  // is, and a stored copy is what goes stale when the folder is moved or copied.
+  const { baseDir: _where, ...stored } = factory;
+  await fsp.writeFile(tmp, `${JSON.stringify(stored, null, 2)}\n`, 'utf8');
   await fsp.rename(tmp, file);
 }
 

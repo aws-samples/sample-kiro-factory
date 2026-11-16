@@ -1,0 +1,4 @@
+[submodule "kiro-flock"]
+	path = kiro-flock
+	url = https://github.com/aws-samples/sample-kiro-flock.git
+	branch = main

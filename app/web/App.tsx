@@ -37,15 +37,77 @@ function initialActive(): string | null {
   return fragment.length > 0 ? decodeURIComponent(fragment) : window.localStorage.getItem(STORE_ACTIVE);
 }
 
+/**
+ * One live remote cluster's fate when its factory is deleted: keep it running
+ * (default), stop it, or stop it and remove it from the flock. Its own state so
+ * the radios redraw; the chosen value is reported up for the delete to send.
+ */
+function RemoteChoice({
+  name,
+  clusterId,
+  onChange,
+}: {
+  name: string;
+  clusterId: string;
+  onChange: (choice: 'keep' | 'stop' | 'delete') => void;
+}) {
+  const [choice, setChoice] = useState<'keep' | 'stop' | 'delete'>('keep');
+  const pick = (c: 'keep' | 'stop' | 'delete'): void => {
+    setChoice(c);
+    onChange(c);
+  };
+  return (
+    <div className="confirm-remote">
+      <span className="confirm-remote-name">
+        {name} <code>{clusterId}</code>
+      </span>
+      <label title="The cluster keeps running on the flock. It appears in the connections dialog as left running, where it can be stopped later.">
+        <input type="radio" checked={choice === 'keep'} onChange={() => pick('keep')} /> keep running
+      </label>
+      <label title="Stop the cluster now. Its files stay in S3 and it stays listed on the flock.">
+        <input type="radio" checked={choice === 'stop'} onChange={() => pick('stop')} /> stop
+      </label>
+      <label title="Stop the cluster and remove it from the flock's list. Its files stay in S3.">
+        <input type="radio" checked={choice === 'delete'} onChange={() => pick('delete')} /> stop and remove
+      </label>
+    </div>
+  );
+}
+
 export function App() {
   const [factories, setFactories] = useState<FactoryRef[]>([]);
   const [active, setActive] = useState<string | null>(initialActive);
   const [confirm, setConfirm] = useState<ConfirmAsk | null>(null);
+  /**
+   * A factory waiting for its folder: an imported file, or a library take-out.
+   * While set, the folder picker is open asking where it goes.
+   */
+  const [placing, setPlacing] = useState<
+    { kind: 'import'; doc: unknown; name: string } | { kind: 'library'; slug: string } | null
+  >(null);
   const [busy, setBusy] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   /** True for a second after the factory was kept, so the button can say so. */
   const [kept, setKept] = useState(false);
+  /**
+   * The library slug the active factory was taken out of, or null when it was not.
+   *
+   * Fetched up here, per active tab, so the reload button's tooltip can say which
+   * file a reload will read. One GET per tab switch; the value is set once at
+   * take-out and never changes after, so there is nothing to keep in step.
+   */
+  const [source, setSource] = useState<string | null>(null);
+  /** True for a second after a reload landed, so the button can say so. */
+  const [reloaded, setReloaded] = useState(false);
+  /**
+   * Bumped when the server rewrote the active document from the library, so the
+   * view remounts and reads it back. The view owns the loops and wires it is editing
+   * and ignores a server copy of them on purpose - see its `onFactory` - so the one
+   * way to put a whole new design in front of it is to start it again, which also
+   * reframes the canvas around the loops as the entry lays them out.
+   */
+  const [generation, setGeneration] = useState(0);
   /**
    * Bumped whenever this shell writes to the library, so the view refetches it.
    *
@@ -112,9 +174,34 @@ export function App() {
 
   const fileInput = useRef<HTMLInputElement>(null);
   const keptTimer = useRef(0);
+  const reloadedTimer = useRef(0);
 
   // A pending tick would otherwise fire against an unmounted component.
-  useEffect(() => () => window.clearTimeout(keptTimer.current), []);
+  useEffect(
+    () => () => {
+      window.clearTimeout(keptTimer.current);
+      window.clearTimeout(reloadedTimer.current);
+    },
+    [],
+  );
+
+  // Where the active factory came from, for the reload button's tooltip. A request
+  // that fails reads as "not from the library", which is the plainer of the two
+  // tooltips; the button itself works either way, since the server decides.
+  useEffect(() => {
+    setSource(null);
+    if (!active) return;
+    let stale = false;
+    void api
+      .getFactory(active)
+      .then((doc) => {
+        if (!stale) setSource(doc.source?.library ?? null);
+      })
+      .catch(() => undefined);
+    return () => {
+      stale = true;
+    };
+  }, [active]);
 
   /**
    * Fetch the catalogue. `retry` is for the picker's button after a failure.
@@ -277,28 +364,56 @@ export function App() {
    * never the project.
    */
   function close(ref: FactoryRef): void {
-    setConfirm({
-      title: `Close "${ref.name}"?`,
-      body:
-        `Its files stay in ${ref.baseDir}. Press Open and walk back to that folder ` +
-        `to get this factory back, exactly as it is now.`,
-      action: 'Close tab',
-      onConfirm: () => {
-        setError(null);
-        void api.closeFactory(ref.id).catch((e: Error) => setError(e.message));
-      },
-      danger: {
-        label: 'Delete factory',
-        keyword: 'delete',
-        description:
-          `Or delete it: the document, queues and everything its loops wrote under ` +
-          `${ref.baseDir}/.kirofactory are removed for good. The rest of the directory is untouched.`,
-        onConfirm: () => {
-          setError(null);
-          void api.deleteFactory(ref.id).catch((e: Error) => setError(e.message));
-        },
-      },
-    });
+    /*
+     * Remote loops first. A factory may be driving clusters on a flock, and
+     * closing or deleting it must never stop one silently: the dialog lists each
+     * live cluster with a choice - keep running (the default), stop, or stop and
+     * remove from the flock - and the delete sends the answers along. A plain
+     * close always keeps: the cluster shows up in the connections dialog as left
+     * running, and reopening the folder picks it back up.
+     */
+    void api
+      .remotes(ref.id)
+      .catch(() => ({ live: [] as { loopId: string; name: string; connection: string; clusterId: string }[] }))
+      .then(({ live }) => {
+        const choices: Record<string, 'keep' | 'stop' | 'delete'> = Object.fromEntries(live.map((l) => [l.loopId, 'keep' as const]));
+        const extra =
+          live.length === 0 ? undefined : (
+            <div className="confirm-remotes">
+              <p>
+                {live.length === 1 ? 'A remote cluster is running' : `${live.length} remote clusters are running`} on a flock.
+                Closing keeps {live.length === 1 ? 'it' : 'them'} running. If you delete the factory, decide per cluster:
+              </p>
+              {live.map((l) => (
+                <RemoteChoice key={l.loopId} name={l.name} clusterId={l.clusterId} onChange={(c) => { choices[l.loopId] = c; }} />
+              ))}
+            </div>
+          );
+        setConfirm({
+          title: `Close "${ref.name}"?`,
+          body:
+            `Its files stay in ${ref.baseDir}. Press Open and walk back to that folder ` +
+            `to get this factory back, exactly as it is now.`,
+          ...(extra !== undefined ? { extra } : {}),
+          action: 'Close tab',
+          onConfirm: () => {
+            setError(null);
+            void api.closeFactory(ref.id).catch((e: Error) => setError(e.message));
+          },
+          danger: {
+            label: 'Delete factory',
+            keyword: 'delete',
+            description:
+              `Or delete it: the document, queues and everything its loops wrote under ` +
+              `${ref.baseDir}/.kirofactory are removed for good. The rest of the directory is untouched.` +
+              (live.length > 0 ? ' Remote clusters follow the choices above.' : ''),
+            onConfirm: () => {
+              setError(null);
+              void api.deleteFactoryWithRemotes(ref.id, choices).catch((e: Error) => setError(e.message));
+            },
+          },
+        });
+      });
   }
 
   function rename(ref: FactoryRef, name: string): void {
@@ -349,14 +464,55 @@ export function App() {
       setError(`${file.name} is not a factory file. A factory is the JSON that Export writes.`);
       return;
     }
+    // Read and checked first, so a broken file is refused before anyone is asked
+    // where to put it. Then the picker asks "into which folder?".
     void file
       .text()
-      .then((text) => api.importFactory(JSON.parse(text)))
-      .then(({ factory, note }) => {
-        setActive(factory.id);
-        if (note) setError(note);
+      .then((text) => {
+        const doc: unknown = JSON.parse(text);
+        const name =
+          typeof doc === 'object' && doc !== null && typeof (doc as { name?: unknown }).name === 'string'
+            ? (doc as { name: string }).name
+            : file.name;
+        setPlacing({ kind: 'import', doc, name });
       })
       .catch((e: Error) => setError(`import failed: ${e.message}`));
+  }
+
+  /**
+   * Put the factory waiting to be placed into the folder picked for it.
+   *
+   * `dir` undefined is "a new folder of its own in the default folder", the same
+   * place `+` puts things. The server refuses a folder that already holds a factory.
+   */
+  function place(dir: string | undefined): void {
+    const what = placing;
+    setPlacing(null);
+    if (what === null) return;
+    setError(null);
+    if (what.kind === 'import') {
+      void api
+        .importFactory(what.doc, dir)
+        .then(({ factory, note }) => {
+          setActive(factory.id);
+          if (note) setError(note);
+        })
+        .catch((e: Error) => setError(`import failed: ${e.message}`));
+    } else {
+      void api
+        .openLibraryFactory(what.slug, dir)
+        .then(({ factory }) => setActive(factory.id))
+        .catch((e: Error) => setError(e.message));
+    }
+  }
+
+  /** A new factory in the folder picked in Open, or in the default folder. */
+  function createIn(dir: string | undefined): void {
+    setError(null);
+    void api
+      .createFactory(dir === undefined ? {} : { baseDir: dir })
+      .then((doc) => setActive(doc.id))
+      .catch((e: Error) => setError(e.message));
   }
 
   /**
@@ -397,10 +553,7 @@ export function App() {
    */
   function openLibraryFactory(slug: string): void {
     setError(null);
-    void api
-      .openLibraryFactory(slug)
-      .then(({ factory }) => setActive(factory.id))
-      .catch((e: Error) => setError(e.message));
+    setPlacing({ kind: 'library', slug });
   }
 
   /**
@@ -452,6 +605,30 @@ export function App() {
         // exists - without it the factory you just kept is missing from the picker
         // until something remounts, which is a reload.
         setLibrarySaved((n) => n + 1);
+      })
+      .catch((e: Error) => setError(e.message));
+  }
+
+  /**
+   * Read the open factory's design again from its file.
+   *
+   * For the case where the file changed after the tab opened - an agent edited the
+   * library entry, or the document itself on disk - and the tab is still showing the
+   * copy it read. The server decides which file (see its route), replaces loops,
+   * wires and parameters and keeps the rest; the view is then remounted to pick the
+   * new design up, see `generation`. The server refuses while loops run, and that
+   * refusal arrives here as the error line like any other.
+   */
+  function reloadFromLibrary(): void {
+    if (!active) return;
+    setError(null);
+    void api
+      .reloadFromLibrary(active)
+      .then(() => {
+        setGeneration((n) => n + 1);
+        setReloaded(true);
+        window.clearTimeout(reloadedTimer.current);
+        reloadedTimer.current = window.setTimeout(() => setReloaded(false), 1600);
       })
       .catch((e: Error) => setError(e.message));
   }
@@ -531,7 +708,27 @@ export function App() {
           title="Open a factory from its folder on this machine"
           showFactories
           onOpenFactory={openFolder}
+          onCreate={createIn}
         />
+        {/*
+          "Into which folder?" for Import and library take-out. The same picker,
+          opened by the action rather than by a click, starting in the default folder.
+          Anchored here so it hangs from the same place Open does.
+        */}
+        {placing !== null && (
+          <FolderPicker
+            current={factories.find((f) => f.id === active)?.baseDir ?? ''}
+            forceOpen
+            onDismiss={() => setPlacing(null)}
+            heading={
+              placing.kind === 'import'
+                ? `Where should "${placing.name}" go? Pick a folder without a factory in it.`
+                : `Where should "${placing.slug}" from the library go? Pick a folder without a factory in it.`
+            }
+            createLabel={placing.kind === 'import' ? 'Import here' : 'Create here'}
+            onCreate={place}
+          />
+        )}
         <button
           className="with-icon"
           onClick={() => fileInput.current?.click()}
@@ -603,6 +800,31 @@ export function App() {
         >
           <Icon name={kept ? 'hero-check' : 'hero-bookmark-square'} />
         </button>
+        {/*
+          Read the design again from the file it lives in: the library entry this
+          factory was taken out of, or - for a factory that was not - its own
+          `.kirofactory/factory.json`. The second is the common case when an agent is
+          editing the document on disk: the server read it once when the tab opened
+          and has shown that copy since. The tooltip says which file it will be.
+
+          Icon only, like the bookmark, and for the same reasons. The arrow into a
+          square is the file landing on this canvas.
+        */}
+        <button
+          className={`icon-only${reloaded ? ' saved' : ''}`}
+          disabled={!active}
+          title={
+            !active
+              ? 'No factory open to reload'
+              : source === null
+                ? 'Reload this factory from its .kirofactory/factory.json on disk. Loops, wires and parameters are replaced; stop the loops first'
+                : `Reload this factory from the library entry "${source}". Loops, wires and parameters are replaced; stop the loops first`
+          }
+          aria-label="Reload this factory from its file"
+          onClick={reloadFromLibrary}
+        >
+          <Icon name={reloaded ? 'hero-check' : 'hero-arrow-down-on-square'} />
+        </button>
         <input
           ref={fileInput}
           type="file"
@@ -619,10 +841,9 @@ export function App() {
 
       {active ? (
         <FactoryView
-          key={active}
+          key={`${active}:${generation}`}
           factoryId={active}
           onImportFile={onFile}
-          onOpenFactory={openFolder}
           onOpenLibraryFactory={openLibraryFactory}
           librarySaved={librarySaved}
           models={models}

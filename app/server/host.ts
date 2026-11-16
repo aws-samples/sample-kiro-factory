@@ -15,6 +15,7 @@ import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Driver } from './acp.ts';
 import {
+  DocumentError,
   INTERNAL,
   channelDir,
   docPath,
@@ -24,6 +25,7 @@ import {
   memberKeys,
   parse,
   producerMode,
+  remoteClusterId,
   save,
   splitMemberId,
   type Factory,
@@ -39,7 +41,21 @@ import {
   type Skill,
   type SteeringFile,
 } from './resources.ts';
-import { Runner, type LoopStatus, type OutputLine } from './runner.ts';
+import { Runner, type LoopStatus, type OutputLine, type RemoteStatus } from './runner.ts';
+import { FlockClient } from './flock/client.ts';
+import { RemoteCluster, RemoteStartError } from './flock/cluster.ts';
+import type { ConnectionStore } from './flock/connections.ts';
+import { Sidecar } from './flock/sidecar.ts';
+import { describeProblems, structuralProblems } from './flock/validate.ts';
+import {
+  groupRuns,
+  newRunId,
+  readAllUsage,
+  readUsage,
+  type RunSummary,
+  type UsageEntry,
+  type UsageTotals,
+} from './usage.ts';
 import {
   provision,
   readSessions,
@@ -77,11 +93,19 @@ export class ConflictError extends Error {
  */
 const SCALE_POLL_MS = 2000;
 
+/**
+ * Which server run this is. One per process, shared by every factory, so the
+ * usage ledger can group a run's iterations and the history can tell the current
+ * run from the ones before a restart.
+ */
+const RUN_ID = newRunId();
 export class Host {
   private factory: Factory;
   private readonly driver: Driver;
   private readonly emit: Emit;
   private readonly runners = new Map<string, Runner>();
+  /** Credits spent this server run, by runner key. Starts empty on every restart. */
+  private readonly usage = new Map<string, UsageTotals>();
   /**
    * The worktree sidecar, cached so `runnerFor` can resolve a session's
    * checkout synchronously - it is called from the supervisor's poll and from
@@ -89,11 +113,21 @@ export class Host {
    * replaced by provisioning and release, which are the only writers.
    */
   private sessions: Sessions = {};
+  /**
+   * The remote loops this factory is driving, by loop id. One `RemoteCluster`
+   * per remote loop, created on Start or on reconnect, dropped on `detach`.
+   * These are never stopped by `dispose`: see `RemoteCluster` for why.
+   */
+  private readonly remotes = new Map<string, RemoteCluster>();
+  private readonly connections: ConnectionStore | undefined;
+  private readonly sidecar: Sidecar;
 
-  constructor(factory: Factory, driver: Driver, emit: Emit) {
+  constructor(factory: Factory, driver: Driver, emit: Emit, connections?: ConnectionStore) {
     this.factory = factory;
     this.driver = driver;
     this.emit = emit;
+    this.connections = connections;
+    this.sidecar = new Sidecar(factory.baseDir);
   }
 
   get id(): string {
@@ -146,6 +180,199 @@ export class Host {
       if (abs !== null) await new Queue(abs).create();
     }
     await this.pruneOrphanQueues();
+    // In the background: this talks to flocks, and opening a factory must not
+    // wait on the network. The card shows `unknown` until the first poll lands.
+    void this.reconnectRemotes().catch((e) => {
+      process.stderr.write(`  [${this.factory.name}] remote reconnect failed: ${e instanceof Error ? e.message : String(e)}\n`);
+    });
+  }
+
+  /* ---------------------------------------------------------- remote loops */
+
+  /**
+   * Build the `RemoteCluster` for a remote loop, or say why there cannot be one.
+   * The connection must exist; nothing is checked against the flock here.
+   */
+  private async remoteFor(loop: Loop): Promise<RemoteCluster> {
+    const existing = this.remotes.get(loop.id);
+    if (existing !== undefined) {
+      // The cached object is bound to one connection, and its cluster id is
+      // derived from it. A stopped loop may be pointed at another flock in the
+      // panel; a cached remote for the old flock must not answer the next Start.
+      if (loop.remote === undefined || existing.connectionId === loop.remote.connection) return existing;
+      if (existing.isLive()) throw new RemoteStartError(`${loop.name} is running on ${existing.connectionName} - stop it before changing its connection`);
+      existing.detach();
+      this.remotes.delete(loop.id);
+    }
+    if (loop.remote === undefined) throw new RemoteStartError('not a remote loop');
+    if (this.connections === undefined) throw new RemoteStartError('remote loops are not available on this server');
+    if (loop.remote.connection.length === 0) throw new RemoteStartError('this loop has no connection yet - pick one in the panel');
+    const connection = await this.connections.get(loop.remote.connection);
+    if (connection === undefined) throw new RemoteStartError(`connection ${loop.remote.connection} not found`);
+    const auth = await this.connections.session(connection.id);
+    const client = new FlockClient(connection.apiUrl, auth);
+    const remote = new RemoteCluster({
+      loopId: loop.id,
+      connectionId: connection.id,
+      connectionName: connection.name,
+      apiUrl: connection.apiUrl,
+      client,
+      auth,
+      sidecar: this.sidecar,
+      factory: () => this.factory,
+      patchLoop: (loopId, patch) => this.patchLoop(loopId, patch),
+      emit: (event: 'status' | 'output', data: unknown) => this.emit(event, data),
+    });
+    this.remotes.set(loop.id, remote);
+    return remote;
+  }
+
+  /**
+   * One loop's fields, changed from the flock's side of the sync rather than by
+   * the canvas. Goes through `parse` so the flock's values are clamped the way a
+   * typed one would be, is saved, and reaches every open tab as a `factory`
+   * event. Deliberately not `replace`: that would push the document back to
+   * the flock it just came from, and run the queue migration for an edit that
+   * touches no wire.
+   */
+  private async patchLoop(loopId: string, patch: Partial<Loop>): Promise<void> {
+    if (!this.factory.loops.some((l) => l.id === loopId)) return;
+    const next = parse(
+      { ...this.factory, loops: this.factory.loops.map((l) => (l.id === loopId ? { ...l, ...patch } : l)) },
+      { id: this.factory.id, name: this.factory.name, baseDir: this.factory.baseDir },
+    );
+    const { source: _dropped, ...rest } = next;
+    this.factory = {
+      ...rest,
+      id: this.factory.id,
+      name: this.factory.name,
+      baseDir: this.factory.baseDir,
+      ...(this.factory.source !== undefined ? { source: this.factory.source } : {}),
+    };
+    await save(this.factory);
+    this.emit('factory', this.factory);
+  }
+
+  /**
+   * Status frames for a remote loop the factory is not driving: every node
+   * `stopped`, and a `remote` block carrying what is knowable without the
+   * flock - the cluster id, which is derived and so exists before the first
+   * Start, the link to it in the flock's dashboard, and whether the connection
+   * is signed in. The id is the thing an operator copies to point the flock's
+   * own tools (`env_upload`, `coder_attach`) at this loop, and needing the
+   * cluster to be running first to learn it was the wrong order.
+   */
+  private idleRemoteStatuses(loop: Loop): LoopStatus[] {
+    const frames = memberKeys(loop).map((key, member) => ({ id: key, loop: loop.id, member, state: 'stopped' as const, iteration: 0 }));
+    const connectionId = loop.remote?.connection ?? '';
+    const peeked = connectionId.length > 0 ? this.connections?.peek(connectionId) : undefined;
+    if (peeked === undefined) return frames;
+    const clusterId = remoteClusterId(connectionId, this.factory.id, loop.id);
+    const remote: RemoteStatus = {
+      clusterState: 'stopped',
+      signedIn: peeked.signedIn,
+      sync: peeked.signedIn ? 'live' : 'signed-out',
+      uiUrl: `${peeked.connection.apiUrl.replace(/\/+$/, '')}/?cluster=${encodeURIComponent(clusterId)}`,
+      clusterId,
+      connection: connectionId,
+    };
+    return frames.map((f) => ({ ...f, remote }));
+  }
+
+  /** The live remote cluster for a loop, if the factory is driving one. */
+  remoteOf(loopId: string): RemoteCluster | undefined {
+    return this.remotes.get(loopId);
+  }
+
+  /** The flock client for a remote loop's connection, for the proxy routes. */
+  async remoteClient(loopId: string): Promise<{ client: FlockClient; clusterId: string; connectionId: string } | undefined> {
+    const loop = this.factory.loops.find((l) => l.id === loopId);
+    if (loop?.remote === undefined) return undefined;
+    const remote = await this.remoteFor(loop);
+    return { client: (remote as unknown as { d: { client: FlockClient } }).d.client, clusterId: remote.clusterId, connectionId: loop.remote.connection };
+  }
+
+  /**
+   * Reconnect to every cluster this factory started earlier (plan section 9.3).
+   *
+   * Two sources, in order. The sidecar: every entry whose loop is still in the
+   * document and still remote. Then the document itself: a remote loop with no
+   * sidecar entry - the folder was copied, the file was lost - is looked up on
+   * its flock by computed id and re-attached when the direction carries this
+   * factory's marker. Clusters that are `stopped` are still attached once so
+   * output written before the stop is collected, then left idle.
+   */
+  private async reconnectRemotes(): Promise<void> {
+    if (this.connections === undefined) return;
+    const remoteLoops = this.factory.loops.filter((l) => l.remote !== undefined && l.remote.connection.length > 0);
+    if (remoteLoops.length === 0) return;
+    const known = new Set((await this.sidecar.entries()).map((e) => e.loopId));
+    for (const loop of remoteLoops) {
+      if (this.remotes.has(loop.id)) continue;
+      try {
+        const remote = await this.remoteFor(loop);
+        if (!known.has(loop.id)) {
+          // Sidecar lost: is our cluster there?
+          const { client } = (await this.remoteClient(loop.id))!;
+          const listed = (await client.listClusters()).some((c) => c.id === remote.clusterId);
+          if (!listed) {
+            this.remotes.delete(loop.id);
+            continue;
+          }
+          const ours = await RemoteCluster.ownedBy(client, remote.clusterId, this.factory.id, loop.id, loop.remote!.connection);
+          if (!ours) {
+            this.remotes.delete(loop.id);
+            continue;
+          }
+          await this.sidecar.put({ loopId: loop.id, connection: loop.remote!.connection, clusterId: remote.clusterId });
+          this.emit('output', { loop: memberKeys(loop)[0]!, ts: new Date().toISOString(), kind: 'system', text: 'sidecar rebuilt from the flock' });
+        }
+        await remote.attach();
+      } catch (e) {
+        process.stderr.write(`  [${this.factory.name}] ${loop.name}: ${e instanceof Error ? e.message : String(e)}\n`);
+      }
+    }
+  }
+
+  /**
+   * Which remote loops use a connection and are live, for the "remove
+   * connection" refusal and the delete dialogs.
+   */
+  remoteLoopsOn(connectionId: string): { loopId: string; name: string; live: boolean }[] {
+    return this.factory.loops
+      .filter((l) => l.remote?.connection === connectionId)
+      .map((l) => ({ loopId: l.id, name: l.name, live: this.remotes.get(l.id)?.isLive() ?? false }));
+  }
+
+  /** Every remote loop that is live right now, for the remove-tab dialog. */
+  liveRemotes(): { loopId: string; name: string; connection: string; clusterId: string }[] {
+    return this.factory.loops
+      .filter((l) => l.remote !== undefined && (this.remotes.get(l.id)?.isLive() ?? false))
+      .map((l) => ({ loopId: l.id, name: l.name, connection: l.remote!.connection, clusterId: this.remotes.get(l.id)!.clusterId }));
+  }
+
+  /**
+   * Remove a remote loop's cluster from its flock. Stops it first if live.
+   * `removeFiles` also deletes its S3 folder. Used by the delete-loop dialog
+   * and by the remove-tab dialog's "Stop and delete" choice.
+   */
+  async destroyRemote(loopId: string, removeFiles: boolean): Promise<void> {
+    const loop = this.factory.loops.find((l) => l.id === loopId);
+    if (loop?.remote === undefined) return;
+    const remote = await this.remoteFor(loop);
+    await remote.destroy(removeFiles);
+    this.remotes.delete(loopId);
+  }
+
+  /** Stop watching a remote loop without touching the cluster. */
+  detachRemote(loopId: string): void {
+    this.remotes.get(loopId)?.detach();
+    this.remotes.delete(loopId);
+  }
+
+  /** The sidecar, for the routes that list and detach remote entries. */
+  get remoteSidecar(): Sidecar {
+    return this.sidecar;
   }
 
   /**
@@ -221,6 +448,10 @@ export class Host {
 
   /** Stop every loop and wait for the turns in flight, so no subprocess is orphaned. */
   async dispose(): Promise<void> {
+    // Remote clusters are detached, never stopped: they are meant to outlive
+    // this process (plan D13). The poll and the bridge stop; the flock keeps going.
+    for (const remote of this.remotes.values()) remote.detach();
+    this.remotes.clear();
     // Supervisors first: one that ticked after the stops below would start a
     // member back up into a host that is going away.
     for (const loopId of [...this.supervisors.keys()]) this.unsupervise(loopId);
@@ -245,6 +476,35 @@ export class Host {
       name: this.factory.name,
       baseDir: this.factory.baseDir,
     });
+
+    /*
+     * Remote loops: fields that cannot exist remotely are a 400 (the client did
+     * not read the document back), and two edits to a live remote loop are
+     * refused outright because either would abandon a running cluster: pointing
+     * the loop at another connection, and disabling it. Stop it first.
+     */
+    const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+    const rawLoops: Record<string, unknown>[] = isRecord(input) && Array.isArray(input.loops) ? input.loops.filter(isRecord) : [];
+    const structural = rawLoops.flatMap((l) => structuralProblems(l));
+    if (structural.length > 0) throw new DocumentError(`remote loop: ${describeProblems(structural)}`);
+    for (const loop of next.loops) {
+      if (loop.remote === undefined) continue;
+      const was = this.factory.loops.find((l) => l.id === loop.id);
+      const live = this.remotes.get(loop.id)?.isLive() ?? false;
+      if (!live && was?.remote !== undefined && was.remote.connection !== loop.remote.connection) {
+        // Stopped and re-pointed: forget the remote built for the old flock so the
+        // next status, uiUrl and Start all come from the new connection.
+        this.remotes.get(loop.id)?.detach();
+        this.remotes.delete(loop.id);
+      }
+      if (!live || was?.remote === undefined) continue;
+      if (was.remote.connection !== loop.remote.connection) {
+        throw new ConflictError(`${loop.name} is running on its flock - stop it before changing its connection`);
+      }
+      if (loop.disabled && !was.disabled) {
+        throw new ConflictError(`${loop.name} is running on its flock - stop it before disabling it`);
+      }
+    }
 
     /*
      * A mode switch under a running fan-out is refused, before anything is saved.
@@ -274,7 +534,17 @@ export class Host {
       }
     }
 
-    this.factory = { ...next, id: this.factory.id, name: this.factory.name, baseDir: this.factory.baseDir };
+    // `source` is kept with the other three the canvas does not own: it records
+    // where the design came from, and a canvas save is an edit to the design, not a
+    // change of where it came from.
+    const { source: _dropped, ...rest } = next;
+    this.factory = {
+      ...rest,
+      id: this.factory.id,
+      name: this.factory.name,
+      baseDir: this.factory.baseDir,
+      ...(this.factory.source !== undefined ? { source: this.factory.source } : {}),
+    };
     await save(this.factory);
 
     /*
@@ -381,6 +651,23 @@ export class Host {
       const loop = this.factory.loops.find((l) => l.id === loopId);
       if (!loop?.cluster || loop.cluster.mode !== 'scaled') this.unsupervise(loopId);
     }
+    /*
+     * Remote loops see the new document too: the direction and the dynamic half
+     * of the config go to a live cluster now, so an edited prompt reaches the
+     * nodes on their next turn. A remote loop the document no longer has, or
+     * that is no longer remote, is *detached*, not stopped - its cluster keeps
+     * running and shows up in the connection dialog's orphan list, where the
+     * operator decides. Nothing in a document edit ever stops a cluster.
+     */
+    for (const [loopId, remote] of this.remotes) {
+      const loop = this.factory.loops.find((l) => l.id === loopId);
+      if (loop?.remote === undefined) {
+        remote.detach();
+        this.remotes.delete(loopId);
+        continue;
+      }
+      void remote.pushDocument();
+    }
     this.emit('factory', this.factory);
     return this.factory;
   }
@@ -394,6 +681,9 @@ export class Host {
 
   /**
    * Point the factory at a different directory.
+   *
+   * Only branching off into a worktree calls this now. A factory is its folder, so
+   * there is no general "move" any more: the PATCH route refuses `baseDir`.
    *
    * Loops are stopped first: their agents are running with the old directory as
    * their cwd, and letting a turn finish writing into a folder the factory has
@@ -414,9 +704,8 @@ export class Host {
      * looked for: `~/.kirofactory/` is where the registry lives, and a factory based
      * at `$HOME` would want that same folder for its own. See `isHomeDir`.
      *
-     * An error rather than the quiet fallback `pickBaseDir` uses, for the reason
-     * every refusal in here is an error: this path was typed into the directory bar,
-     * and using a different one than the operator asked for is worse than saying no.
+     * An error, like every refusal in here: using a different directory than the one
+     * asked for is worse than saying no.
      */
     if (isHomeDir(baseDir)) {
       throw new Error(
@@ -604,9 +893,19 @@ export class Host {
         ...(checkout !== undefined ? { branch: checkout.branch } : {}),
         driver: this.driver,
         ...(member !== undefined ? { member } : {}),
+        runId: RUN_ID,
       });
       runner.on('status', (s: LoopStatus) => this.emit('status', s));
       runner.on('output', (line: OutputLine) => this.emit('output', line));
+      runner.on('usage', (entry: UsageEntry) => {
+        // Kept here as well as on the runner, because a runner can be dropped
+        // while the server is up and its cost is still part of this run.
+        this.usage.set(entry.key, {
+          credits: entry.totalCredits,
+          unmetered: (this.usage.get(entry.key)?.unmetered ?? 0) + (entry.unmetered ? 1 : 0),
+        });
+        this.emit('usage', entry);
+      });
       this.runners.set(key, runner);
     }
     return runner;
@@ -622,20 +921,27 @@ export class Host {
    * things to keep in step.
    */
   statusAll(): LoopStatus[] {
-    return this.factory.loops.flatMap((l) =>
-      memberKeys(l).map((key) => {
+    return this.factory.loops.flatMap((l) => {
+      if (l.remote !== undefined) {
+        const remote = this.remotes.get(l.id);
+        if (remote !== undefined) return remote.statuses();
+        return this.idleRemoteStatuses(l);
+      }
+      return memberKeys(l).map((key) => {
         const known = this.runners.get(key)?.status();
         if (known) return known;
         const { member } = splitMemberId(key);
+        const spent = this.usage.get(key);
         return {
+          ...(spent !== undefined ? { credits: spent.credits, unmetered: spent.unmetered } : {}),
           id: key,
           loop: l.id,
           ...(l.cluster !== undefined && member !== undefined ? { member } : {}),
           state: 'stopped' as const,
           iteration: 0,
         };
-      }),
-    );
+      });
+    });
   }
 
   /**
@@ -664,6 +970,22 @@ export class Host {
     const loop = this.factory.loops.find((l) => l.id === loopId);
     if (!loop) return undefined;
     if (!this.startable(loopId)) return this.componentStatus(loop);
+
+    if (loop.remote !== undefined) {
+      const remote = await this.remoteFor(loop);
+      // Start on a paused cluster is Resume: the card's Pause button put it
+      // there (or the flock's autopause did), and the one button that means
+      // "go" should undo either.
+      if (remote.state === 'paused') {
+        await remote.resume();
+        return this.componentStatus(loop);
+      }
+      if (remote.isLive()) return this.componentStatus(loop);
+      // RemoteStartError carries the flock's own words; the route turns it into
+      // a 409 like a provisioning failure.
+      await remote.start();
+      return this.componentStatus(loop);
+    }
 
     /*
      * Per-session checkouts are made here, before any runner exists - not on
@@ -716,6 +1038,15 @@ export class Host {
   stopLoop(loopId: string): LoopStatus | undefined {
     const loop = this.factory.loops.find((l) => l.id === loopId);
     if (!loop) return undefined;
+    if (loop.remote !== undefined) {
+      // On a remote card the Stop button is Pause: the flock's own gentle verb.
+      // The nodes idle and spend nothing; the tasks stay up (and bill), so the
+      // cluster is back in seconds on Start. The bolt beside it is the stop.
+      // Fire and report: the flock answers at once and the status poll watches
+      // it land. A failure shows on the loop's output stream.
+      void this.remotes.get(loopId)?.pause().catch(() => undefined);
+      return this.componentStatus(loop);
+    }
     // Before the members, so it cannot start one back up between the two.
     this.unsupervise(loopId);
     for (const key of memberKeys(loop)) this.runners.get(key)?.stop();
@@ -744,6 +1075,12 @@ export class Host {
   forceStopLoop(loopId: string): LoopStatus | undefined {
     const loop = this.factory.loops.find((l) => l.id === loopId);
     if (!loop) return undefined;
+    if (loop.remote !== undefined) {
+      // The zap: the flock's stop. Nodes do not finish their turn, the tasks
+      // end, billing ends. This is the only button on the card that does.
+      void this.remotes.get(loopId)?.forceStop();
+      return this.componentStatus(loop);
+    }
     this.unsupervise(loopId);
     for (const key of memberKeys(loop)) this.runners.get(key)?.forceStop();
     return this.componentStatus(loop);
@@ -758,9 +1095,14 @@ export class Host {
    * client for why those two rules and not others.
    */
   private componentStatus(loop: Loop): LoopStatus {
-    const parts = memberKeys(loop).map(
-      (key) => this.runners.get(key)?.status() ?? { state: 'stopped' as const, iteration: 0 },
-    );
+    const remote = loop.remote !== undefined ? this.remotes.get(loop.id) : undefined;
+    const parts: (Pick<LoopStatus, 'state' | 'iteration'> & { remote?: RemoteStatus })[] = remote !== undefined
+      ? remote.statuses()
+      : loop.remote !== undefined
+        ? this.idleRemoteStatuses(loop)
+        : memberKeys(loop).map(
+            (key) => this.runners.get(key)?.status() ?? { state: 'stopped' as const, iteration: 0 },
+          );
     const has = (s: LoopStatus['state']): boolean => parts.some((p) => p.state === s);
     return {
       id: loop.id,
@@ -773,6 +1115,7 @@ export class Host {
             ? 'paused'
             : 'stopped',
       iteration: parts.reduce((sum, p) => sum + p.iteration, 0),
+      ...(parts[0] !== undefined && 'remote' in parts[0] && parts[0].remote !== undefined ? { remote: parts[0].remote } : {}),
     };
   }
 
@@ -910,6 +1253,12 @@ export class Host {
     return true;
   }
 
+  /** Whether a runner key belongs to a remote loop, for the routes that refuse one. */
+  isRemoteKey(key: string): boolean {
+    const { loopId } = splitMemberId(key);
+    return this.factory.loops.some((l) => l.id === loopId && l.remote !== undefined);
+  }
+
   /**
    * Sequential on purpose, not for tidiness: a component with checkouts to
    * provision takes the repository's index lock, so two components provisioning
@@ -928,6 +1277,9 @@ export class Host {
   stopAll(): LoopStatus[] {
     for (const loopId of [...this.supervisors.keys()]) this.unsupervise(loopId);
     for (const runner of this.runners.values()) runner.stop();
+    // Stop on the whole factory does to each remote cluster what the card's
+    // Stop does: pause. Force stop all is the one that stops them.
+    for (const remote of this.remotes.values()) void remote.pause().catch(() => undefined);
     return this.statusAll();
   }
 
@@ -935,12 +1287,28 @@ export class Host {
   forceStopAll(): LoopStatus[] {
     for (const loopId of [...this.supervisors.keys()]) this.unsupervise(loopId);
     for (const runner of this.runners.values()) runner.forceStop();
+    for (const remote of this.remotes.values()) void remote.forceStop();
     return this.statusAll();
   }
 
   /** One session's log, by runner key. A cluster's members are separate logs. */
   output(key: string): OutputLine[] {
+    const { loopId } = splitMemberId(key);
+    const remote = this.remotes.get(loopId);
+    if (remote !== undefined) return remote.recentOutput().map((l) => ({ ...l, loop: key }));
     return this.runners.get(key)?.recentOutput() ?? [];
+  }
+  /**
+   * One session's finished iterations in the current server run, for the cost
+   * beside each divider after a page reload. Earlier runs are not included: the
+   * log they belong to is gone, and their cost is in `usageHistory`.
+   */
+  async usageFor(key: string): Promise<UsageEntry[]> {
+    return (await readUsage(this.factory.baseDir, key)).filter((e) => e.runId === RUN_ID);
+  }
+  /** This factory's past and current runs, newest first. */
+  async usageHistory(): Promise<{ current: string; runs: RunSummary[] }> {
+    return { current: RUN_ID, runs: groupRuns(await readAllUsage(this.factory.baseDir)) };
   }
 
   /* ------------------------------------------------------ scaled clusters */
@@ -1082,7 +1450,10 @@ export class Host {
    * change things under it" would be wrong about it.
    */
   anyRunning(): boolean {
-    return [...this.runners.values()].some((r) => r.status().state !== 'stopped');
+    return (
+      [...this.runners.values()].some((r) => r.status().state !== 'stopped') ||
+      [...this.remotes.values()].some((r) => r.isLive())
+    );
   }
 
   /* ---------------------------------------------------------------- queues */

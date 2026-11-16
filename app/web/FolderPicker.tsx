@@ -16,11 +16,15 @@
  * nothing here is a place you stay. You go down until you are standing in the
  * project, and then you press the button that says so.
  *
- * Which button depends on what the caller asked for, because a folder can answer two
- * different questions. `onPick` is "put this factory here", which is the directory
- * bar. `onOpenFactory` is "the factory in here, open it", which is how a closed tab
- * comes back - and it is offered only when the listing says a factory is actually in
- * the folder, so it is never a guess.
+ * A factory is a folder, so a folder answers one of two questions. Holding a factory,
+ * it is that factory: its row opens it in one click (`onOpenFactory`), and the arrow
+ * beside the row goes inside instead. Without one, it is somewhere a factory can go
+ * (`onCreate`): "Create a factory here", or "Import here" when the picker was opened
+ * to place an imported file. A path can be pasted into the header and Enter goes
+ * there, opening the factory if that is what the path is.
+ *
+ * The footer also says where `+` puts new factories and lets the folder you are
+ * standing in become that default.
  *
  * Walking is not the only way back to a closed factory, though, and `showFactories`
  * is the other: a second tab in the same popover, listing the factories the server
@@ -37,7 +41,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Confirm, type ConfirmAsk } from './Confirm.tsx';
 import { Icon, type IconName } from './Icon.tsx';
-import { api, type BrowseDir } from './api.ts';
+import { api, type AppConfig, type BrowseDir } from './api.ts';
 import type { FactoryRef } from './types.ts';
 
 /** The popover's width and the gap to keep from the window edge. Must agree with
@@ -69,8 +73,12 @@ export function FolderPicker({
   icon = 'hero-folder-open',
   title = 'Choose a different directory',
   showFactories = false,
-  onPick,
   onOpenFactory,
+  onCreate,
+  createLabel = 'Create here',
+  forceOpen = false,
+  onDismiss,
+  heading,
 }: {
   /** Where to start looking. The path the field is holding right now. */
   current: string;
@@ -97,12 +105,24 @@ export function FolderPicker({
    */
   showFactories?: boolean;
   /**
-   * Take the folder you are standing in.
+   * Put a factory in the folder you are standing in.
    *
-   * Optional, because the two things you can do with a folder here are separable: a
-   * picker offered only to reopen a factory has no business moving one.
+   * Offered only where there is no factory yet. Called with `undefined` when you are
+   * standing in the default folder, which means "a new folder of its own in here" -
+   * the same thing `+` does - rather than making the default folder itself a factory.
    */
-  onPick?: (dir: string) => void;
+  onCreate?: (dir: string | undefined) => void;
+  /** The create button's words: "Create a factory here", "Import here". */
+  createLabel?: string;
+  /**
+   * Open without the trigger being pressed, and stay open until dismissed. For
+   * Import and library take-out, which ask "into which folder?" and start in the
+   * default folder. `onDismiss` is called when it closes for any reason.
+   */
+  forceOpen?: boolean;
+  onDismiss?: () => void;
+  /** A line at the top of the popover saying what the folder is for. */
+  heading?: string;
   /**
    * Open the factory that is already in the folder you are standing in.
    *
@@ -113,7 +133,21 @@ export function FolderPicker({
    */
   onOpenFactory?: (dir: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [clicked, setShown] = useState(false);
+  const open = forceOpen || clicked;
+  const setOpen = useCallback(
+    (next: boolean): void => {
+      setShown(next);
+      if (!next && forceOpen) onDismiss?.();
+    },
+    [forceOpen, onDismiss],
+  );
+  /** Where new factories go, for the footer line and "Create here" in that folder. */
+  const [config, setConfig] = useState<AppConfig | null>(null);
+  /** The path field: what is typed, kept in step with the folder shown. */
+  const [pathDraft, setPathDraft] = useState('');
+  /** A new folder's name while it is being typed; null when not making one. */
+  const [naming, setNaming] = useState<string | null>(null);
   const [dir, setDir] = useState<BrowseDir | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -190,8 +224,85 @@ export function FolderPicker({
     // stylesheet; measuring the popover itself would mean rendering it misplaced.
     const anchor = root.current?.getBoundingClientRect();
     if (anchor) setAlignRight(anchor.left + POP_WIDTH > window.innerWidth - MARGIN);
-    go(current.trim().length > 0 ? current : undefined);
-  }, [open, current, go]);
+    // A forced open is "into which folder?", so it starts where new factories go.
+    if (!forceOpen) go(current.trim().length > 0 ? current : undefined);
+    void api
+      .config()
+      .then((c) => {
+        setConfig(c);
+        if (forceOpen) go(c.defaultDir);
+      })
+      .catch(() => {
+        if (forceOpen) go(current.trim().length > 0 ? current : undefined);
+      });
+  }, [open, current, go, forceOpen]);
+
+  // The path field shows where you are, and is overwritten whenever you move.
+  useEffect(() => {
+    setPathDraft(dir?.path ?? '');
+    setNaming(null);
+  }, [dir?.path]);
+
+  // Scrolled to its end, because the end of a path is the part that names the folder.
+  const pathField = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const el = pathField.current;
+    if (el && document.activeElement !== el) el.scrollLeft = el.scrollWidth;
+  }, [pathDraft]);
+
+  /**
+   * Go to a typed or pasted path. If it is exactly a folder holding a factory, and
+   * this picker opens factories, open it: pasting a project path and pressing Enter
+   * is the shortest way there is. Otherwise just show that folder.
+   */
+  function goTyped(value: string): void {
+    const asked = value.trim();
+    if (asked.length === 0) return;
+    setBusy(true);
+    setError(null);
+    void api
+      .browse(asked)
+      .then((next) => {
+        if (next.exact === true && next.factory && onOpenFactory) {
+          onOpenFactory(next.path);
+          setOpen(false);
+          return;
+        }
+        setDir(next);
+        setError(next.exact === false ? `${asked} does not exist. Showing the nearest folder above it.` : (next.note ?? null));
+      })
+      .catch((e: Error) => setError(e.message))
+      .finally(() => setBusy(false));
+  }
+
+  function makeFolder(): void {
+    const name = (naming ?? '').trim();
+    if (!dir || name.length === 0) return;
+    setBusy(true);
+    setError(null);
+    void api
+      .mkdir(dir.path, name)
+      .then((next) => {
+        setDir(next);
+        setNaming(null);
+      })
+      .catch((e: Error) => setError(e.message))
+      .finally(() => setBusy(false));
+  }
+
+  function makeDefault(to: string | null): void {
+    setError(null);
+    void api
+      .setDefaultDir(to)
+      .then(setConfig)
+      .catch((e: Error) => setError(e.message));
+  }
+
+  function create(): void {
+    if (!dir || !onCreate) return;
+    onCreate(config !== null && dir.path === config.defaultDir ? undefined : dir.path);
+    setOpen(false);
+  }
 
   // Every open starts on Folders, whichever tab the last one ended on. The trigger
   // says "a folder on this machine", so opening onto a list of factory names would be
@@ -256,7 +367,7 @@ export function FolderPicker({
       document.removeEventListener('keydown', onKey);
       document.removeEventListener('pointerdown', onDown);
     };
-  }, [open, scanAsk]);
+  }, [open, scanAsk, setOpen]);
 
   // Descending leaves the scroll position where the last folder's list had it,
   // which reads as the new list opening halfway down. Back to the top on arrival,
@@ -265,11 +376,6 @@ export function FolderPicker({
     if (list.current) list.current.scrollTop = 0;
     setFilter('');
   }, [dir?.path]);
-
-  function choose(): void {
-    if (dir && onPick) onPick(dir.path);
-    setOpen(false);
-  }
 
   function openHere(): void {
     if (dir && onOpenFactory) onOpenFactory(dir.path);
@@ -366,28 +472,27 @@ export function FolderPicker({
 
   return (
     <div className="picker" ref={root}>
-      <button
-        className={label === undefined ? 'icon-only' : 'with-icon'}
-        disabled={disabled}
-        // The default title is "Choose", not "Browse". The button next to this one in
-        // the directory bar browses - it shows the files in the directory - and this
-        // one changes which directory it is. Two buttons both offering to browse a
-        // folder is how you click the wrong one.
-        title={title}
-        aria-label={title}
-        aria-expanded={open}
-        onClick={() => setOpen((was) => !was)}
-      >
-        <Icon name={icon} />
-        {label}
-      </button>
+      {!forceOpen && (
+        <button
+          className={label === undefined ? 'icon-only' : 'with-icon'}
+          disabled={disabled}
+          title={title}
+          aria-label={title}
+          aria-expanded={open}
+          onClick={() => setOpen(!open)}
+        >
+          <Icon name={icon} />
+          {label}
+        </button>
+      )}
 
       {open && (
         <div
           className={`picker-pop${alignRight ? ' align-right' : ''}`}
           role="dialog"
-          aria-label="Choose a folder"
+          aria-label={heading ?? 'Choose a folder'}
         >
+          {heading !== undefined && <p className="picker-heading">{heading}</p>}
           {/*
             The two ways of naming a factory you want open: where it is, or what it is
             called. A strip rather than a mode switch on the trigger, because they are
@@ -444,14 +549,40 @@ export function FolderPicker({
             >
               <Icon name="hero-home" />
             </button>
+            <button
+              className="icon-only"
+              disabled={!dir || busy}
+              title="New folder in here"
+              aria-label="New folder"
+              onClick={() => setNaming((was) => (was === null ? '' : null))}
+            >
+              <Icon name="hero-folder-plus" />
+            </button>
             {/*
-              The path is the title of the popover, and it is long, so it scrolls
-              rather than wrapping the header onto three lines. Kept selectable:
-              sometimes what you came for is the text, not the folder.
+              The path, editable. Paste a path (Finder's Option-Command-C, or the copy
+              button beside any path in this app) and press Enter: a folder holding a
+              factory opens, anything else is shown. Escape puts back where you are.
             */}
-            <code className="picker-path" title={dir === null ? '' : factoryHint(dir)}>
-              {dir?.path ?? '…'}
-            </code>
+            <input
+              ref={pathField}
+              className="picker-path"
+              value={pathDraft}
+              spellCheck={false}
+              placeholder="Paste a path and press Enter"
+              title={dir === null ? '' : factoryHint(dir)}
+              aria-label="Folder path"
+              onChange={(e) => setPathDraft(e.target.value)}
+              onBlur={(e) => {
+                e.currentTarget.scrollLeft = e.currentTarget.scrollWidth;
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') goTyped(pathDraft);
+                if (e.key === 'Escape' && pathDraft !== (dir?.path ?? '')) {
+                  setPathDraft(dir?.path ?? '');
+                  e.stopPropagation();
+                }
+              }}
+            />
             {/*
               The folder you are standing in, marked the same way its children are.
 
@@ -481,6 +612,27 @@ export function FolderPicker({
             only because the lists differ, a folder being somewhere to go into and a
             factory being something to open.
           */}
+          {tab === 'folders' && naming !== null && (
+            <div className="picker-filter picker-naming">
+              <Icon name="hero-folder-plus" />
+              <input
+                autoFocus
+                value={naming}
+                placeholder="New folder name, then Enter"
+                spellCheck={false}
+                aria-label="New folder name"
+                onChange={(e) => setNaming(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') makeFolder();
+                  if (e.key === 'Escape') {
+                    setNaming(null);
+                    e.stopPropagation();
+                  }
+                }}
+              />
+            </div>
+          )}
+
           <div className="picker-filter">
             <Icon name="hero-magnifying-glass" />
             <input
@@ -506,14 +658,26 @@ export function FolderPicker({
 
           {tab === 'folders' ? (
           <div className="picker-list" ref={list}>
-            {shown.map((entry) => (
+            {shown.map((entry) => {
+              // A factory row opens that factory in one click, when this picker opens
+              // factories. The arrow beside it still goes inside, for a factory nested
+              // in another factory's folder.
+              const opens = entry.factory && onOpenFactory !== undefined;
+              return (
+              <div key={entry.path} className="picker-row">
               <button
-                key={entry.path}
                 className={`picker-entry${entry.factory ? ' has-factory' : ''}${
                   entry.open ? ' is-open' : ''
                 }`}
-                title={factoryHint(entry)}
-                onClick={() => go(entry.path)}
+                title={opens ? `${factoryHint(entry)}\n\nClick to open it.` : factoryHint(entry)}
+                onClick={() => {
+                  if (opens) {
+                    onOpenFactory!(entry.path);
+                    setOpen(false);
+                  } else {
+                    go(entry.path);
+                  }
+                }}
               >
                 <Icon name="hero-folder" />
                 <span className="picker-name">{entry.name}</span>
@@ -540,7 +704,19 @@ export function FolderPicker({
                   </span>
                 )}
               </button>
-            ))}
+              {opens && (
+                <button
+                  className="icon-only picker-descend"
+                  title={`Go inside ${entry.name} instead of opening it`}
+                  aria-label={`Go inside ${entry.name}`}
+                  onClick={() => go(entry.path)}
+                >
+                  <Icon name="hero-chevron-right" />
+                </button>
+              )}
+              </div>
+              );
+            })}
             {dir && shown.length === 0 && !busy && (
               <p className="picker-empty">
                 {dir.entries.length > 0
@@ -613,63 +789,82 @@ export function FolderPicker({
             </p>
           )}
 
+          {/*
+            Where `+` puts new factories, and the one place it is changed. Shown on the
+            folder tab only, since it is about folders. "reset" appears once it has been
+            moved off the built-in default.
+          */}
+          {tab === 'folders' && config !== null && (
+            <p className="picker-default" title={config.defaultDir}>
+              <span>New factories go to</span>
+              {/* <bdi> keeps the path left-to-right inside the right-to-left truncation,
+                  which would otherwise move the leading "/" to the end. */}
+              <code>
+                <bdi>{config.defaultDir}</bdi>
+              </code>
+              {config.defaultDir !== config.builtinDefaultDir && (
+                <button
+                  className="picker-link"
+                  title={`Back to ${config.builtinDefaultDir}`}
+                  onClick={() => makeDefault(null)}
+                >
+                  reset
+                </button>
+              )}
+            </p>
+          )}
+
           <div className="picker-foot">
             {/*
-              The folder you are standing in is the one you get. There is no
-              highlighted row to confuse this with: clicking a row goes into it, and
-              this takes where you are, which means the deepest folder is reachable
-              without a listing of its own.
+              Make the folder you are standing in the default for new factories. Only
+              in the Open picker, only for a plain folder: not a factory's own folder,
+              not home (the server refuses it), not the one that already is the default.
             */}
+            {showFactories &&
+              tab === 'folders' &&
+              dir !== null &&
+              config !== null &&
+              !dir.factory &&
+              dir.path !== dir.home &&
+              dir.path !== config.defaultDir && (
+                <button
+                  className="with-icon"
+                  disabled={busy}
+                  title={`New factories will be created in their own folder inside ${dir.path}`}
+                  onClick={() => makeDefault(dir.path)}
+                >
+                  <Icon name="hero-bookmark-square" />
+                  Make default
+                </button>
+              )}
             {/*
-              Gone entirely when a factory is already in the folder, rather than
-              offered and refused.
-
-              Two factories cannot share a directory - their documents would be the
-              same file - so `Host.setBaseDir` rejects the move, and a button whose
-              only outcome is an error is worse than no button: it reads as the
-              obvious thing to press, and the popover has just gone to the trouble of
-              highlighting the row that makes it impossible. What is left in the
-              footer is the action that folder actually supports.
-
-              It also hides the one move that would have worked, pointing a factory
-              back at a directory it used to occupy, because the id in that document
-              is its own and the server would allow it. The picker cannot tell that
-              case apart - the listing says a factory is there, not whose - and the
-              field beside the button still takes a typed path for it.
-
-              Gone in the home directory too, and that one is not about occupancy: the
-              list of factories lives in `~/.kirofactory/`, which is the folder a
-              factory based here would want for itself, so the server refuses it. Same
-              reasoning as above for hiding rather than offering - `Host.setBaseDir`
-              has the message for anyone who types the path in anyway.
+              Put a factory here. Only where there is none yet and never in home. In the
+              default folder it makes a new folder of its own inside it, like `+`.
             */}
-            {onPick && tab === 'folders' && dir?.factory !== true && dir?.path !== dir?.home && (
-              <button className="with-icon" disabled={!dir || busy} onClick={choose}>
-                <Icon name="hero-check" />
-                Use this folder
+            {onCreate && tab === 'folders' && dir !== null && !dir.factory && dir.path !== dir.home && (
+              <button
+                className="with-icon"
+                disabled={busy}
+                title={
+                  config !== null && dir.path === config.defaultDir
+                    ? `In a new folder of its own inside ${dir.path}`
+                    : `This folder becomes the factory's project folder: ${dir.path}`
+                }
+                onClick={create}
+              >
+                <Icon name="hero-plus" />
+                {config !== null && dir.path === config.defaultDir ? `${createLabel.replace(/ here$/, '')} in new folder` : createLabel}
               </button>
             )}
             {/*
-              And the other thing a folder can be: the factory already in it.
-
-              Enabled only when there is one, so pressing it is never a guess - and
-              when that factory is already a tab it says switch, because that is
-              honestly all it does.
-
-              Both of these are about the folder you are standing in, so both are gone
-              on the Factories tab, where there is no folder you are standing in. A row
-              there is the whole action: one press, and the factory it names opens.
-              Cancel is what is left, which is all that tab needs.
+              The factory in the folder you are standing in. Rows open in one click, so
+              this is for the folder you walked into with the arrow, or pasted.
             */}
-            {onOpenFactory && tab === 'folders' && (
+            {onOpenFactory && tab === 'folders' && dir?.factory === true && (
               <button
                 className="with-icon"
-                disabled={!dir || busy || !dir.factory}
-                title={
-                  dir?.factory !== true
-                    ? 'No factory in this folder. Walk into the one that holds it.'
-                    : factoryHint(dir)
-                }
+                disabled={busy}
+                title={factoryHint(dir)}
                 onClick={openHere}
               >
                 <Icon name="hero-folder-open" />
@@ -681,11 +876,9 @@ export function FolderPicker({
                   footer has room for.
                 */}
                 <span className="picker-open-name">
-                  {dir?.factory !== true
-                    ? 'Open this factory'
-                    : dir.open
-                      ? 'Switch to it'
-                      : `Open ${dir.factoryName === undefined ? 'this factory' : `"${dir.factoryName}"`}`}
+                  {dir.open
+                    ? 'Switch to it'
+                    : `Open ${dir.factoryName === undefined ? 'this factory' : `"${dir.factoryName}"`}`}
                 </span>
               </button>
             )}

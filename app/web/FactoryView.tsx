@@ -10,19 +10,24 @@
  * The prompt is still the only setting a loop has, so the panel is a name field, a
  * textarea and the output stream.
  */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { Canvas } from './Canvas.tsx';
 import { Confirm, type ConfirmAsk } from './Confirm.tsx';
-import { FolderPicker } from './FolderPicker.tsx';
 import { Icon } from './Icon.tsx';
-import { LoopFiles, type FilesTarget } from './LoopFiles.tsx';
-import { api, subscribe, type GitState, type Outbox, type SessionCheckout } from './api.ts';
+import { CopyPath, LoopFiles, type FilesTarget } from './LoopFiles.tsx';
+import { FlockConnect } from './FlockConnect.tsx';
+import { RemoteBar, RemoteOutput, RemoteSettings, remoteProblems } from './RemotePanel.tsx';
+import { useDismissOnOutside } from './useDismissOnOutside.ts';
+import { api, subscribe, type FlockConnectionView, type GitState, type Outbox, type SessionCheckout } from './api.ts';
+import { creditsToUsd, fmtCredits } from './costFormat.ts';
+import { UsageHistory } from './UsageHistory.tsx';
 import { DEFAULT_VIEW, type View } from './geometry.ts';
 import {
   CLUSTER_MAX,
   CLUSTER_MIN,
   INTERVAL_SECONDS,
+  REMOTE_INTERVAL_MAX,
   aggregate,
   intervalLabel,
   memberCount,
@@ -36,6 +41,7 @@ import {
   type Factory,
   NO_LIBRARY,
   type FactoryEntry,
+  type UsageEntry,
   type FactoryResources,
   type GrantDefaults,
   type LibraryIndex,
@@ -188,7 +194,6 @@ function copyName(name: string, loops: Loop[]): string {
 export function FactoryView({
   factoryId,
   onImportFile,
-  onOpenFactory,
   onOpenLibraryFactory,
   librarySaved,
   models,
@@ -200,13 +205,7 @@ export function FactoryView({
   /** A factory file dropped on the canvas: imported by the shell, which owns tabs. */
   onImportFile: (file: File) => void;
   /**
-   * A directory holding another factory: opened as its own tab by the shell, for
-   * the same reason importing is. Both end with a different factory in front of
-   * you, and which tab is in front of you is not this view's to decide.
-   */
-  onOpenFactory: (dir: string) => void;
-  /**
-   * A factory taken out of the library: opened as its own tab, like the two above.
+   * A factory taken out of the library: opened as its own tab, like an import.
    *
    * The picker that offers it sits on this view's toolbar because that is where the
    * library is, but a factory entry is the one kind that cannot land on this canvas -
@@ -275,6 +274,14 @@ export function FactoryView({
    */
   const [fitOnLoad, setFitOnLoad] = useState(0);
   const [output, setOutput] = useState<Map<string, OutputLine[]>>(new Map());
+  /**
+   * Finished iterations of the current server run, by runner key, for the cost on
+   * each iteration divider. Filled from the server when a log is opened and kept
+   * current by the `usage` event, so a page reload still shows them.
+   */
+  const [usage, setUsage] = useState<Map<string, UsageEntry[]>>(new Map());
+  /** Whether the run history popup is open. */
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [selected, setSelected] = useState<Selection | null>(null);
   const [error, setError] = useState<string | null>(null);
   /** Questions this view asks: so far, deleting a wire that has work on it. */
@@ -403,6 +410,26 @@ export function FactoryView({
    * not carry the attribute and this is three lines.
    */
   const [openPick, setOpenPick] = useState<'mcp' | 'tools' | 'skills' | 'steering' | null>(null);
+
+  /**
+   * Kiro Flock connections, for remote loops. Per operator, not per factory, and
+   * never carrying a secret: the server answers with whether each is signed in.
+   * Loaded once and refreshed whenever the dialog changes something.
+   */
+  const [connections, setConnections] = useState<FlockConnectionView[]>([]);
+  /**
+   * The connections dialog, when open. `pick` is the mode a new remote loop opens
+   * it in: choosing a connection closes the dialog and writes it onto that loop.
+   */
+  const [flockDialog, setFlockDialog] = useState<null | { mode: 'manage' } | { mode: 'pick'; loopId: string }>(null);
+  /** Per connection: the flock's model ids and its node cap, fetched on demand. */
+  const [flockModels, setFlockModels] = useState<Map<string, ModelCatalog>>(new Map());
+  const [flockCaps, setFlockCaps] = useState<Map<string, number>>(new Map());
+
+  const refreshConnections = useCallback((): void => {
+    void api.flocks.list().then(setConnections).catch(() => undefined);
+  }, []);
+  useEffect(refreshConnections, [refreshConnections]);
 
   /**
    * The prompt's textarea, held here rather than inside `PromptBox`, because the
@@ -664,6 +691,10 @@ export function FactoryView({
           setFactory((prev) => ({ ...prev, name: doc.name, baseDir: doc.baseDir }));
         }
       },
+      onUsage: (entry) => {
+        if (entry.factory !== factoryId) return;
+        setUsage((prev) => new Map(prev).set(entry.key, mergeUsage(prev.get(entry.key) ?? [], [entry])));
+      },
       onOutput: (line) => {
         if (line.factory !== factoryId) return;
         // Not yet seeded from the server's buffer: held raw until that arrives,
@@ -885,6 +916,65 @@ export function FactoryView({
   }
 
   /**
+   * Put a remote loop on the canvas: a cluster that runs on a Kiro Flock.
+   *
+   * The same card as a cluster, with `remote` on it and the flock's shape forced
+   * (`fixed`, `flock` comms, no local size ceiling). With one connection it is
+   * used; with none or several the dialog opens to add or pick one, and the loop
+   * waits with an empty connection until it is chosen - unstartable, visibly so,
+   * never silently pointed at a flock nobody picked.
+   */
+  function addRemote(): void {
+    const n = factory.loops.length + 1;
+    const id = `loop-${Date.now().toString(36)}`;
+    const view = viewRef.current;
+    const connection = connections.length === 1 ? connections[0]!.id : '';
+    change({
+      ...factory,
+      loops: [
+        ...factory.loops,
+        {
+          id,
+          name: `Remote ${n}`,
+          prompt: '',
+          // Wait for work is the sensible default for something that bills by the
+          // hour: the flock pauses the nodes after three idle turns and the factory
+          // wakes them when an item arrives.
+          autoPause: true,
+          autoStop: false,
+          disabled: false,
+          cluster: { mode: 'fixed', size: 3, comms: 'flock' },
+          remote: { kind: 'flock', connection, neighbourRadius: 1 },
+          x: Math.round(view.x + 60 + ((n - 1) % 4) * 260),
+          y: Math.round(view.y + 60 + Math.floor((n - 1) / 4) * 190),
+        },
+      ],
+    });
+    setSelected({ kind: 'loop', id });
+    if (connection === '') setFlockDialog({ mode: 'pick', loopId: id });
+  }
+
+  /** The flock's model catalog and cap for a connection, fetched once per session. */
+  function loadFlockMeta(connectionId: string): void {
+    if (connectionId === '' || flockModels.has(connectionId)) return;
+    void api.flocks
+      .models(connectionId)
+      .then((cat) =>
+        setFlockModels((m) =>
+          new Map(m).set(connectionId, {
+            models: cat.models.map((x) => ({ id: x.model_id, name: x.model_name ?? x.model_id, ...(x.description ? { description: x.description } : {}) })),
+            ...(cat.default_model ? { defaultId: cat.default_model } : {}),
+          }),
+        ),
+      )
+      .catch(() => setFlockModels((m) => new Map(m).set(connectionId, { models: [], failed: true, reason: 'could not read the flock model list' })));
+    void api.flocks
+      .limits(connectionId)
+      .then((l) => setFlockCaps((m) => new Map(m).set(connectionId, l.concurrencyCap)))
+      .catch(() => undefined);
+  }
+
+  /**
    * Delete whichever thing is selected. A loop takes its wires with it.
    *
    * For a wire this is the whole fan-out, not the one branch: selecting a wire
@@ -904,6 +994,46 @@ export function FactoryView({
     let doomed: Wire[];
     if (selected.kind === 'loop') {
       const id = selected.id;
+      /*
+       * A remote loop with a live cluster: the dialog says so and the confirm
+       * stops it. Deleting the card never stops a cluster silently - that is the
+       * one rule the whole remote design rests on - so the question is asked in
+       * words, and the harder answer (also delete its S3 folder) sits behind the
+       * typed keyword like deleting a factory does.
+       */
+      const remoteLoop = factory.loops.find((l) => l.id === id);
+      if (remoteLoop?.remote !== undefined) {
+        const live = aggregate(remoteLoop, status).state !== 'stopped';
+        const removeDoc = (): void => {
+          change({
+            ...factory,
+            loops: factory.loops.filter((l) => l.id !== id),
+            wires: factory.wires.filter((w) => w.from !== id && w.to !== id),
+          });
+          setSelected(null);
+        };
+        const destroy = (files: boolean) => (): void => {
+          void api
+            .destroyRemote(factoryId, id, files)
+            .then(removeDoc)
+            .catch((e: Error) => setError(e.message));
+        };
+        setConfirm({
+          title: live ? `Delete ${remoteLoop.name} and stop its cluster?` : `Delete ${remoteLoop.name}?`,
+          body: live
+            ? 'This stops the remote cluster now - its nodes do not finish their current turn - and removes it from the flock. Its files in S3 stay.'
+            : 'The cluster is removed from the flock. Its files in S3 stay.',
+          action: live ? 'Stop and delete' : 'Delete loop',
+          onConfirm: destroy(false),
+          danger: {
+            label: 'Delete remote files too',
+            keyword: 'delete',
+            description: 'Also delete everything under environment/<cluster>/ on the flock: queues, claimed items, scratch. This cannot be undone.',
+            onConfirm: destroy(true),
+          },
+        });
+        return;
+      }
       remove = () =>
         change({
           ...factory,
@@ -1133,22 +1263,6 @@ export function FactoryView({
   }
 
   /**
-   * Point the factory at another directory.
-   *
-   * Sent on blur or Enter rather than per keystroke: a half-typed path is a
-   * different directory, and the server creates the one it is given.
-   */
-  function setBaseDir(dir: string): void {
-    const next = dir.trim();
-    if (next.length === 0 || next === factory.baseDir) return;
-    setError(null);
-    void api
-      .patchFactory(factoryId, { baseDir: next })
-      .then((doc) => setFactory((prev) => ({ ...prev, baseDir: doc.baseDir })))
-      .catch((e: Error) => setError(e.message));
-  }
-
-  /**
    * Give this factory a checkout and a branch of its own, after asking.
    *
    * Asked rather than done, and it is the one thing on this bar that warrants a
@@ -1313,6 +1427,29 @@ export function FactoryView({
    */
   const selectedRunning =
     selectedLoop !== null && aggregate(selectedLoop, status).state !== 'stopped';
+
+  /** The selected loop is remote: most of the panel branches on this. */
+  const selectedRemote = selectedLoop?.remote !== undefined;
+  const selectedConnection = selectedRemote
+    ? connections.find((c) => c.id === selectedLoop!.remote!.connection)
+    : undefined;
+  // The flock's catalog and cap, fetched the first time a loop on it is selected.
+  useEffect(() => {
+    if (selectedConnection !== undefined && selectedConnection.signedIn) loadFlockMeta(selectedConnection.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedConnection?.id, selectedConnection?.signedIn]);
+  const selectedProblems = useMemo(
+    () =>
+      selectedLoop !== null && selectedRemote
+        ? remoteProblems(selectedLoop, factory, connections, flockModels.get(selectedLoop.remote!.connection)?.models.map((m) => m.id))
+        : [],
+    [selectedLoop, selectedRemote, factory, connections, flockModels],
+  );
+  /** The `remote` block off any member's status frame: they all carry the same one. */
+  const selectedRemoteStatus = useMemo(
+    () => (selectedLoop !== null && selectedRemote ? memberKeys(selectedLoop).map((k) => status.get(k)?.remote).find((r) => r !== undefined) : undefined),
+    [selectedLoop, selectedRemote, status],
+  );
 
   /**
    * Write `@name ` into the selected loop's prompt, where the caret last was.
@@ -1569,6 +1706,13 @@ export function FactoryView({
       .output(factoryId, readingKey)
       .then(land)
       .catch(() => land([]));
+    // Merged, not assigned: an iteration can end while this request is in flight.
+    void api
+      .usage(factoryId, readingKey)
+      .then((entries) =>
+        setUsage((prev) => new Map(prev).set(readingKey, mergeUsage(prev.get(readingKey) ?? [], entries))),
+      )
+      .catch(() => undefined);
   }, [readingKey, factoryId]);
   const selectedWire = useMemo(
     () => (selected?.kind === 'wire' ? factory.wires.find((w) => w.id === selected.id) ?? null : null),
@@ -1590,6 +1734,8 @@ export function FactoryView({
   // its agents' cwd and will take a turn on its own, so the bar must stay locked
   // and the badge must stay lit.
   const anyRunning = [...status.values()].some((s) => s.state !== 'stopped');
+  /** Everything this factory's sessions have spent since the server started. */
+  const factoryCredits = [...status.values()].reduce((sum, s) => sum + (s.credits ?? 0), 0);
 
   return (
     <>
@@ -1600,7 +1746,11 @@ export function FactoryView({
         </button>
         <button
           className="with-icon"
-          title="Finish the turn in flight, then stop. Nothing is interrupted."
+          title={
+            factory.loops.some((l) => l.remote !== undefined)
+              ? 'Finish the turn in flight, then stop. Nothing is interrupted. Remote loops are paused, not stopped: their tasks keep billing until you zap them.'
+              : 'Finish the turn in flight, then stop. Nothing is interrupted.'
+          }
           onClick={() => void api.stopAll(factoryId).catch(() => undefined)}
         >
           <Icon name="hero-stop" />
@@ -1614,7 +1764,11 @@ export function FactoryView({
         */}
         <button
           className="icon-only force-stop"
-          title="Force stop"
+          title={
+            factory.loops.some((l) => l.remote !== undefined)
+              ? 'Force stop: kill every turn in flight. Remote clusters are stopped on the flock (zapped); billing ends.'
+              : 'Force stop'
+          }
           aria-label="Force stop"
           onClick={() => void api.forceStopAll(factoryId).catch(() => undefined)}
         >
@@ -1637,6 +1791,27 @@ export function FactoryView({
           <Icon name="cluster" />
           Loop cluster
         </button>
+        {/*
+          The third kind of component: a cluster that runs on a Kiro Flock you
+          already have, rather than as subprocesses here. Same card, same strip,
+          same panel; what differs is where the agents are.
+        */}
+        <button
+          className="with-icon add-loop"
+          onClick={addRemote}
+          title="A loop cluster that runs on a Kiro Flock: the nodes are Fargate tasks on your flock, the queues are its S3, and it keeps running when this factory is closed."
+        >
+          <Icon name="hero-cloud" />
+          Remote loop
+        </button>
+        <button
+          className="icon-only"
+          title="Kiro Flock connections"
+          aria-label="Kiro Flock connections"
+          onClick={() => setFlockDialog({ mode: 'manage' })}
+        >
+          <Icon name="hero-cog-6-tooth" />
+        </button>
         <LibraryPicker
           library={library}
           onPick={(entry) => addLoop(entry)}
@@ -1644,6 +1819,19 @@ export function FactoryView({
         />
         <span className="spacer" />
         {anyRunning && <span className="live">running</span>}
+        <button
+          className="header-cost"
+          title="Credits spent by this factory since the server started. Click for its run history."
+          aria-label="Run history"
+          onClick={() => setHistoryOpen(true)}
+        >
+          <span>${creditsToUsd(factoryCredits).toFixed(2)}</span>
+          <span>{factoryCredits.toFixed(2)} cr</span>
+        </button>
+        <UsageHistory
+          factory={historyOpen ? { id: factoryId, name: factory.name } : null}
+          onClose={() => setHistoryOpen(false)}
+        />
         {error && (
           <span className="error" title={error} onClick={() => setError(null)}>
             {error}
@@ -1658,9 +1846,7 @@ export function FactoryView({
         parameters={parameters}
         servers={mcpServers}
         resources={resources}
-        onChange={setBaseDir}
         onParameters={setParameters}
-        onOpenFactory={onOpenFactory}
         onBranchOff={branchOff}
       />
 
@@ -1756,7 +1942,9 @@ export function FactoryView({
               factoryId={factoryId}
               target={filesTarget}
               loop={
-                selectedLoop ? { id: selectedLoop.id, name: selectedLoop.name } : null
+                selectedLoop
+                  ? { id: selectedLoop.id, name: selectedLoop.name, ...(selectedLoop.remote !== undefined ? { remote: true } : {}) }
+                  : null
               }
               git={git}
               /*
@@ -1896,7 +2084,8 @@ export function FactoryView({
                   <SaveToLibrary loop={selectedLoop} onSaved={refreshLibrary} onError={setError} />
                   {/*
                     One button, both directions: a loop becomes a cluster, a cluster
-                    becomes a loop again.
+                    becomes a loop again. Not on a remote loop: it is a cluster by
+                    definition, and the flock has no single-node shape to convert to.
 
                     One rather than two because there is one question here - how many
                     sessions is this - and the answer is a toggle. The glyph names the
@@ -1908,11 +2097,13 @@ export function FactoryView({
                     acts on this component, and the order is how far each goes: keep
                     it, change what it is, remove it.
                   */}
-                  <ConvertKind
-                    loop={selectedLoop}
-                    running={selectedRunning}
-                    onConvert={(cluster) => patchLoop(selectedLoop.id, { cluster })}
-                  />
+                  {!selectedRemote && (
+                    <ConvertKind
+                      loop={selectedLoop}
+                      running={selectedRunning}
+                      onConvert={(cluster) => patchLoop(selectedLoop.id, { cluster })}
+                    />
+                  )}
                   {/*
                     Deleting the loop lives here, next to saving it, because both are
                     things you do to *this* loop rather than to the factory. The
@@ -1949,6 +2140,7 @@ export function FactoryView({
                   parameters={parameters}
                   skills={resources.skills}
                   steeringFiles={resources.steeringFiles}
+                  remote={selectedLoop.remote !== undefined}
                 />
                 {/*
                   The loop's settings, in one row: when it runs (wait for work),
@@ -1971,21 +2163,46 @@ export function FactoryView({
                   dials of the same kind, and the size dial would sit beside the
                   iteration-cap dial looking like a sibling of it.
                 */}
-                {selectedLoop.cluster && (
-                  <ClusterSettings
-                    cluster={selectedLoop.cluster}
-                    reads={factory.wires.filter((w) => w.to === selectedLoop.id).length}
+                {selectedRemote ? (
+                  <RemoteSettings
+                    loop={selectedLoop}
                     running={selectedRunning}
-                    worktree={selectedLoop.worktree === true}
-                    onChange={(next) =>
-                      patchLoop(selectedLoop.id, { cluster: { ...selectedLoop.cluster!, ...next } })
-                    }
+                    connections={connections}
+                    cap={flockCaps.get(selectedLoop.remote!.connection)}
+                    onChange={(next) => patchLoop(selectedLoop.id, next)}
+                    onPickConnection={() => setFlockDialog({ mode: 'pick', loopId: selectedLoop.id })}
                   />
+                ) : (
+                  selectedLoop.cluster && (
+                    <ClusterSettings
+                      cluster={selectedLoop.cluster}
+                      reads={factory.wires.filter((w) => w.to === selectedLoop.id).length}
+                      running={selectedRunning}
+                      worktree={selectedLoop.worktree === true}
+                      onChange={(next) =>
+                        patchLoop(selectedLoop.id, { cluster: { ...selectedLoop.cluster!, ...next } })
+                      }
+                    />
+                  )
+                )}
+                {/*
+                  What stops a remote loop from starting, said before Start is
+                  pressed. The server's answer is the one that counts and arrives
+                  as the 409 text; this is the same list, computed here so the
+                  reason is visible while the prompt is being written.
+                */}
+                {selectedRemote && selectedProblems.length > 0 && !selectedRunning && (
+                  <ul className="remote-problems" title="A remote loop cannot start until these are fixed">
+                    {selectedProblems.map((p) => (
+                      <li key={p}>{p}</li>
+                    ))}
+                  </ul>
                 )}
                 <div className="loop-settings">
                   <RunMode
                     loop={selectedLoop}
                     reads={factory.wires.filter((w) => w.to === selectedLoop.id).length}
+                    remote={selectedRemote}
                     onChange={(next) => patchLoop(selectedLoop.id, next)}
                   />
                   {/*
@@ -1996,8 +2213,31 @@ export function FactoryView({
                   */}
                   <IntervalPick
                     seconds={selectedLoop.intervalSeconds}
+                    max={selectedRemote ? REMOTE_INTERVAL_MAX : undefined}
                     onChange={(next) => patchLoop(selectedLoop.id, { intervalSeconds: next })}
                   />
+                  {selectedRemote ? (
+                    /*
+                      In place of the grant and resource pickers: a remote agent
+                      has the flock's fixed tools and nothing from this machine,
+                      so there is nothing here to pick. The model comes from the
+                      flock's own catalog rather than kiro-cli's on this machine.
+                    */
+                    <ModelPicker
+                      model={selectedLoop.model}
+                      catalog={flockModels.get(selectedLoop.remote!.connection) ?? { models: [] }}
+                      onRetry={() => {
+                        setFlockModels((m) => {
+                          const next = new Map(m);
+                          next.delete(selectedLoop.remote!.connection);
+                          return next;
+                        });
+                        loadFlockMeta(selectedLoop.remote!.connection);
+                      }}
+                      onChange={(next) => patchLoop(selectedLoop.id, { model: next })}
+                    />
+                  ) : (
+                  <>
                   <McpScope
                     mcp={selectedLoop.mcp}
                     servers={mcpServers}
@@ -2099,6 +2339,8 @@ export function FactoryView({
                       onRelease={releaseCheckouts}
                     />
                   )}
+                  </>
+                  )}
                 </div>
                 {/*
                   The split's divider carries the same fold control as the other
@@ -2146,6 +2388,13 @@ export function FactoryView({
                     sentences spliced together. Switching is the only version of this
                     that yields something readable.
                   */}
+                  {selectedRemote && (
+                    <RemoteBar
+                      remote={selectedRemoteStatus}
+                      connection={selectedConnection}
+                      onSignIn={() => setFlockDialog({ mode: 'manage' })}
+                    />
+                  )}
                   {selectedLoop.cluster && (
                     <MemberStrip
                       loop={selectedLoop}
@@ -2154,15 +2403,39 @@ export function FactoryView({
                       onPick={setMemberPick}
                     />
                   )}
-                  <Output lines={output.get(readingKey ?? selectedLoop.id) ?? []} />
-                  <SteerBox
-                    running={(status.get(readingKey ?? selectedLoop.id)?.state ?? 'stopped') !== 'stopped'}
-                    onSend={(text) =>
-                      void api
-                        .steerLoop(factoryId, readingKey ?? selectedLoop.id, text)
-                        .catch((e: Error) => setError(e.message))
-                    }
-                  />
+                  {selectedRemote ? (
+                    /*
+                      The node's own transcript, fetched from the flock, in place of
+                      the local log; the bridge's lines are its third view. And no
+                      chat: a remote node has no channel for one. The direction is
+                      how it is steered, and the prompt is the direction.
+                    */
+                    <>
+                      <RemoteOutput
+                        factoryId={factoryId}
+                        loop={selectedLoop}
+                        member={memberIndex}
+                        status={status.get(readingKey ?? selectedLoop.id)}
+                        bridgeLines={output.get(readingKey ?? selectedLoop.id) ?? []}
+                      />
+                      <p className="remote-steer-note">Edit the prompt to steer. Nodes read it on their next turn.</p>
+                    </>
+                  ) : (
+                    <>
+                      <Output
+                        lines={output.get(readingKey ?? selectedLoop.id) ?? []}
+                        usage={usage.get(readingKey ?? selectedLoop.id) ?? []}
+                      />
+                      <SteerBox
+                        running={(status.get(readingKey ?? selectedLoop.id)?.state ?? 'stopped') !== 'stopped'}
+                        onSend={(text) =>
+                          void api
+                            .steerLoop(factoryId, readingKey ?? selectedLoop.id, text)
+                            .catch((e: Error) => setError(e.message))
+                        }
+                      />
+                    </>
+                  )}
                 </div>
               </>
             )}
@@ -2171,6 +2444,24 @@ export function FactoryView({
 
       {/* Asked by the canvas: removing a wire that still has work waiting on it. */}
       <Confirm ask={confirm} onClose={() => setConfirm(null)} />
+
+      {/* Kiro Flock connections: managed from the toolbar, or picked for a new remote loop. */}
+      <FlockConnect
+        open={flockDialog !== null}
+        connections={connections}
+        onChange={refreshConnections}
+        onClose={() => setFlockDialog(null)}
+        {...(flockDialog?.mode === 'pick'
+          ? {
+              onPick: (connectionId: string) => {
+                const loopId = flockDialog.loopId;
+                const loop = factory.loops.find((l) => l.id === loopId);
+                if (loop?.remote !== undefined) patchLoop(loopId, { remote: { ...loop.remote, connection: connectionId } });
+                setFlockDialog(null);
+              },
+            }
+          : {})}
+      />
     </>
   );
 }
@@ -2398,10 +2689,14 @@ function WorktreePick({
       {on && current !== undefined && (
         <span
           className="dirbar-git worktree"
-          title={`This session works in ${current.dir}, a worktree on its own branch. Other sessions have checkouts of their own.`}
+          title={`${current.branch}\n\nThis session works in ${current.dir}, a worktree on its own branch. Other sessions have checkouts of their own.`}
         >
           <Icon name="branch" />
-          {current.branch}
+          {/* Trimmed from the left: the branch is kirofactory/<factory>-<loop>-nN,
+              and only its tail tells one session from another. */}
+          <span className="dirbar-git-name tail">
+            <bdi>{current.branch}</bdi>
+          </span>
         </span>
       )}
       {on && provisioned > 0 && !running && (
@@ -2448,6 +2743,7 @@ function MemberStrip({
       {memberKeys(loop).map((key, n) => {
         const state = status.get(key)?.state ?? 'stopped';
         const iteration = status.get(key)?.iteration ?? 0;
+        const credits = status.get(key)?.credits;
         // `n1` for the first node, not `n0`. The index is zero-based because it is
         // an array position and a ring modulo; what a person points at is the first
         // node. `nodeLabel` is the single place those two meet, and it names the
@@ -2467,6 +2763,7 @@ function MemberStrip({
             onClick={() => onPick(n)}
           >
             {label}
+            {credits !== undefined && <span className="cost">{fmtCredits(credits)}</span>}
             {/* The dot is the whole point of the bar being more than a switch: it
                 says which nodes are up without opening each one's log. */}
             {state !== 'stopped' && <span className="member-dot" aria-hidden="true" />}
@@ -2529,10 +2826,19 @@ const RUN_MODE_PATCH: Record<RunModeKey, Partial<Loop>> = {
 function RunMode({
   loop,
   reads,
+  remote = false,
   onChange,
 }: {
   loop: Loop;
   reads: number;
+  /**
+   * A remote loop has three of the five. "Wait for work" is offered under the
+   * flock's name for it, Autopause: same field, same idle-then-pause meaning.
+   * Auto stop and "After iterations" are not offered: the flock pauses on idle
+   * rather than stopping, and has no single iteration count across nodes.
+   * "After hours" is enforced by the factory, which the tip says.
+   */
+  remote?: boolean;
   onChange: (next: Partial<Loop>) => void;
 }) {
   // Reading the fields back as one value, in the parse's own precedence, so the
@@ -2555,9 +2861,19 @@ function RunMode({
     stop: 'The agent may end the run itself: it declares there is no further work, then confirms it on one more turn. Only the confirmation stops the loop.',
     iterations:
       'The run ends after this many turns. Counted from Start, so a restart gives the loop the full count again.',
-    hours:
-      'The run ends once this long has passed since Start. A turn already going is allowed to finish.',
+    hours: remote
+      ? 'The factory stops the cluster once this long has passed since Start. Enforced by the factory, so it fires while the factory is running, or as soon as it reconnects if it was away; the cluster overruns while the factory is down.'
+      : 'The run ends once this long has passed since Start. A turn already going is allowed to finish.',
   };
+  if (remote) {
+    // The same `autoPause` field, under the flock's own name for it. The flock's
+    // autopause is the remote handshake that the local "wait for work" is: the
+    // nodes report idle, the cluster pauses, and work arriving resumes it.
+    tips.wait = reads === 0
+      ? 'Autopause: the flock pauses the cluster after three idle turns (the tasks keep billing). Nothing is wired into this loop, so nothing wakes it until an item arrives.'
+      : 'Autopause: the flock pauses the cluster after three idle turns (the tasks keep billing). The factory resumes it when an item arrives.';
+    tips.forever = 'The cluster runs until it is zapped, here or in the flock UI. Pause holds it; nothing stops it otherwise - not closing this factory, not quitting the app.';
+  }
   return (
     <>
       <select
@@ -2567,18 +2883,22 @@ function RunMode({
         aria-label="Run mode"
         onChange={(e) => onChange(RUN_MODE_PATCH[e.target.value as RunModeKey])}
       >
-        <option value="stop" title={tips.stop}>
-          Auto stop
-        </option>
+        {!remote && (
+          <option value="stop" title={tips.stop}>
+            Auto stop
+          </option>
+        )}
         <option value="wait" title={tips.wait}>
-          Wait for work
+          {remote ? 'Autopause' : 'Wait for work'}
         </option>
         <option value="forever" title={tips.forever}>
           Run forever
         </option>
-        <option value="iterations" title={tips.iterations}>
-          After iterations
-        </option>
+        {!remote && (
+          <option value="iterations" title={tips.iterations}>
+            After iterations
+          </option>
+        )}
         <option value="hours" title={tips.hours}>
           After hours
         </option>
@@ -2894,19 +3214,23 @@ function Stepper({
  */
 function IntervalPick({
   seconds,
+  max,
   onChange,
 }: {
   seconds: number | undefined;
+  /** A ceiling below the ladder's top, for a remote loop: the flock stops at an hour. */
+  max?: number;
   /** `undefined` at zero, so the field leaves the document rather than sitting at 0. */
   onChange: (next?: number) => void;
 }) {
   const value = seconds ?? 0;
+  const steps = max === undefined ? INTERVAL_SECONDS : INTERVAL_SECONDS.filter((s) => s <= max);
   return (
     <Stepper
       value={value}
       min={0}
-      max={INTERVAL_SECONDS[INTERVAL_SECONDS.length - 1]!}
-      steps={INTERVAL_SECONDS}
+      max={steps[steps.length - 1]!}
+      steps={steps}
       unit="interval"
       // The field says the duration the way everything else says it: `intervalLabel`
       // itself, not a second formatter that would drift from it. `parseDuration`
@@ -2924,57 +3248,6 @@ function IntervalPick({
       onChange={(n) => onChange(n > 0 ? n : undefined)}
     />
   );
-}
-
-/**
- * Shut a menu when the pointer goes down outside it, or on Escape.
- *
- * Returns the ref to put on the menu's root. Both picks below use it, which is why
- * it is a hook rather than the same effect written twice: they are the same control
- * with different contents, and a dismissal rule that drifted between them would be
- * the kind of difference nobody notices until one of them feels broken.
- *
- * `pointerdown` rather than `click`, so the menu is gone before whatever was clicked
- * behind it reacts. It fires ahead of the native `<summary>` toggle too, which is
- * what makes clicking the *other* menu's summary work: this one shuts on the press,
- * that one opens on the click, and the exclusivity guard in `openPick` sorts out the
- * two toggle events that arrive from it.
- *
- * A press inside the menu is left alone - ticking a checkbox is not leaving, and the
- * whole point of this dropdown is ticking several things before you go.
- *
- * Escape comes along because it is the same gesture by another means, and the folder
- * picker already answers it. Listening only while open keeps both handlers off the
- * document the rest of the time.
- */
-function useDismissOnOutside<T extends HTMLElement = HTMLDetailsElement>(
-  open: boolean,
-  onClose: () => void,
-) {
-  const root = useRef<T>(null);
-  // The latest callback, read at event time. In the dependency list it would
-  // re-register both listeners on every render, since every caller passes a fresh
-  // arrow - this keeps the effect keyed on the one thing that matters.
-  const close = useRef(onClose);
-  close.current = onClose;
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: PointerEvent): void => {
-      if (!root.current?.contains(e.target as Node)) close.current();
-    };
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') close.current();
-    };
-    document.addEventListener('pointerdown', onDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('pointerdown', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [open]);
-
-  return root;
 }
 
 /**
@@ -4067,9 +4340,7 @@ function BaseDirBar({
   parameters,
   servers,
   resources,
-  onChange,
   onParameters,
-  onOpenFactory,
   onBranchOff,
 }: {
   baseDir: string;
@@ -4082,14 +4353,10 @@ function BaseDirBar({
   servers: McpServer[];
   /** Same warning, other kinds: a parameter can shadow a skill or steering file. */
   resources: FactoryResources;
-  onChange: (dir: string) => void;
   onParameters: (next: Parameter[]) => void;
-  /** Open the factory found in another directory, as its own tab. */
-  onOpenFactory: (dir: string) => void;
   /** Branch off into a worktree and move there. */
   onBranchOff: () => void;
 }) {
-  const [draft, setDraft] = useState(baseDir);
   /**
    * Whether the parameters panel is folded open. Local, and deliberately not saved.
    *
@@ -4098,13 +4365,6 @@ function BaseDirBar({
    * that differs between two people looking at the same factory.
    */
   const [open, setOpen] = useState(false);
-
-  // The field follows the factory when the server changes it - on load, or after a
-  // move that the server relocated - but not while you are mid-edit in it.
-  const focused = useRef(false);
-  useEffect(() => {
-    if (!focused.current) setDraft(baseDir);
-  }, [baseDir]);
 
   // Deleting the last parameter takes the panel and its arrow away, so the fold
   // state has to go with them - otherwise adding one again would open a panel the
@@ -4157,35 +4417,22 @@ function BaseDirBar({
       >
         @project
       </code>
-      <input
+      {/*
+        The folder, as text. A factory is its folder - the document sits in
+        `.kirofactory/` inside it - so there is nothing to change here. A factory
+        somewhere else is a different factory: Open it, or create one there.
+      */}
+      <code
         className="dirbar-path"
-        value={draft}
-        spellCheck={false}
-        placeholder="/path/to/your/project"
-        title={
-          running
-            ? 'Changing this stops the running loops first, so no turn finishes into a directory the factory has left'
-            : 'The working directory for every loop in this factory'
-        }
-        onFocus={() => {
-          focused.current = true;
-        }}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={() => {
-          focused.current = false;
-          onChange(draft);
-        }}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') e.currentTarget.blur();
-          if (e.key === 'Escape') {
-            setDraft(baseDir);
-            e.currentTarget.blur();
-          }
-        }}
-      />
+        title={`${baseDir}\n\nThe working directory for every loop in this factory. A factory lives in its folder; to use this design elsewhere, Export it and Import it there.`}
+      >
+        {/* <bdi> keeps the path left-to-right inside the right-to-left truncation. */}
+        <bdi>{baseDir}</bdi>
+      </code>
       <code className="dirbar-internal" title="Queues, loop folders and this factory's document live here">
         /.kirofactory
       </code>
+      <CopyPath value={baseDir} />
       {/*
         What git makes of this directory, and the one control that changes it.
         
@@ -4200,18 +4447,6 @@ function BaseDirBar({
         Three states, and they are the three a directory can be in: see `GitState`.
       */}
       <GitBadge git={git} running={running} onBranchOff={onBranchOff} />
-      {/*
-        Beside the field, not in place of it. Typing a path is still the fastest way
-        in when you know it - pasting one especially - and the picker is for when you
-        do not. It starts from whatever the field holds, so the two are one control.
-      */}
-      {/*
-        Two answers, because walking to a folder that already holds a factory used to
-        be a dead end: the listing marked it, and the only button available was the
-        one the server refuses. Now the same walk ends in either move-here or
-        open-that-one, and the picker offers whichever the folder supports.
-      */}
-      <FolderPicker current={baseDir} onPick={onChange} onOpenFactory={onOpenFactory} />
       {/*
         The show-the-files button that lived here is gone deliberately: the file
         panel now rests on the project view, so "point the panel at the project"
@@ -4593,11 +4828,38 @@ function GitBadge({
 }
 
 /**
+ * Add finished iterations to a runner's list, one per iteration number.
+ *
+ * Numbers are unique within a server run, and the list only ever holds the current
+ * run, so the number is the identity. Needed because the `usage` event and the
+ * fetch on opening a log can both deliver the same iteration.
+ */
+function mergeUsage(have: UsageEntry[], incoming: UsageEntry[]): UsageEntry[] {
+  // A server restart starts numbering over, so anything from another run goes.
+  const run = incoming[0]?.runId;
+  const byIteration = new Map(have.filter((u) => u.runId === run).map((u) => [u.iteration, u]));
+  for (const u of incoming) byIteration.set(u.iteration, u);
+  return [...byIteration.values()].sort((a, b) => a.iteration - b.iteration);
+}
+/** What one finished iteration cost, on its divider. Nothing until it has ended. */
+function IterationCost({ entry }: { entry?: UsageEntry }) {
+  if (!entry) return null;
+  return entry.credits !== undefined ? (
+    <span className="cost" title="Credits kiro-cli metered for this iteration">
+      {fmtCredits(entry.credits)}
+    </span>
+  ) : (
+    <span className="cost unmetered" title="This iteration was interrupted or kiro-cli recorded no credits for it">
+      not metered
+    </span>
+  );
+}
+/**
  * The loop's output, newest at the bottom, pinned to the bottom while you are
  * already there. Scrolling up to read something stops the pin, because a view that
  * yanks itself away mid-sentence is worse than one that needs a scroll.
  */
-function Output({ lines }: { lines: OutputLine[] }) {
+function Output({ lines, usage }: { lines: OutputLine[]; usage: UsageEntry[] }) {
   const box = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
 
@@ -4630,6 +4892,9 @@ function Output({ lines }: { lines: OutputLine[] }) {
         lines.map((line, i) => (
           <div key={i} className={`line ${line.kind}`}>
             {line.text}
+            {(line.kind === 'iteration' || line.kind === 'iteration-steered') && (
+              <IterationCost entry={usage.find((u) => u.iteration === line.iteration)} />
+            )}
           </div>
         ))
       )}
@@ -5301,6 +5566,44 @@ function suggestions(
   ];
 }
 
+/**
+ * What a *remote* loop's prompt can name: the flock's vocabulary, and nothing
+ * from this machine. Same order as the local menu - wires, then the directory,
+ * then parameters, then the one tool - so the hand that learned one finds the
+ * other familiar. Mirrors `REMOTE_RESERVED` on the server; an entry here that
+ * `startProblems` refuses would be the menu offering what Start rejects.
+ *
+ * `@environment` stands where `@project` does locally: the cluster's own folder
+ * on the flock, `environment/<cluster id>/`, which holds the queues, every
+ * node's scratch, and whatever the operator uploaded with the flock's tools.
+ * `@browser` is offered only with the browser flag on, because the node only
+ * has the `puppeteer` server then.
+ */
+/** The flock's tools as `@` words. Mirrors `remoteTools` on the server. */
+const REMOTE_TOOL_WORDS = ['browser', 'deploy'] as const;
+function remoteSuggestions(reads: number, writes: number, parameters: Parameter[]): Suggestion[] {
+  const queue = (n: number, dir: string): string =>
+    n === 0 ? `nothing wired ${dir}` : `${n} queue${n === 1 ? '' : 's'} ${dir}`;
+  return [
+    { token: '@input', hint: queue(reads, 'in'), cls: 'tok-in', group: 'Wires' },
+    { token: '@output', hint: queue(writes, 'out'), cls: 'tok-out', group: 'Wires' },
+    // Hints are short so the token, which is the thing being chosen, never
+    // truncates in the fixed-width menu; the full meaning is in the HOWTO.
+    { token: '@environment', hint: 'cluster folder', cls: 'tok-dir', group: 'Dir' },
+    { token: '@loop', hint: 'node scratch', cls: 'tok-dir', group: 'Dir' },
+    ...parameters.map(
+      (p): Suggestion => ({
+        token: `@${p.name}`,
+        hint: p.value.trim().length === 0 ? 'not set' : shortValue(p.value),
+        cls: 'tok-param',
+        group: 'Parameters',
+      }),
+    ),
+    { token: '@browser', hint: 'puppeteer', cls: 'tok-mcp', group: 'Tools' },
+    { token: '@deploy', hint: 'aga-deploy, needs the trust deploy tick in Tools', cls: 'tok-mcp', group: 'Tools' },
+  ];
+}
+
 /** Separators are noise when filtering, so `@awsd` still finds `aws-docs`. */
 function loosely(s: string): string {
   return s.toLowerCase().replace(/[-_.\s]/g, '');
@@ -5326,10 +5629,16 @@ function classOf(
   params: Set<string>,
   skills: Set<string>,
   steering: Set<string>,
+  remote: boolean,
 ): Suggestion['cls'] | null {
   if (token === '@input') return 'tok-in';
   if (token === '@output') return 'tok-out';
-  if (token === '@project' || token === '@loop') return 'tok-dir';
+  if (token === '@loop') return 'tok-dir';
+  // The directory words differ by where the loop runs: a remote node has the
+  // cluster's folder on the flock and no checkout, so `@environment` is the
+  // directory there and `@project` resolves to nothing (and Start refuses it).
+  if (token === '@project') return remote ? null : 'tok-dir';
+  if (token === '@environment') return remote ? 'tok-dir' : null;
   const name = token.slice(1).toLowerCase();
   if (params.has(name)) return 'tok-param';
   if (servers.has(name)) return 'tok-mcp';
@@ -5363,6 +5672,7 @@ function mirrorNodes(
   params: Set<string>,
   skills: Set<string>,
   steering: Set<string>,
+  remote: boolean,
   caret: number | null,
   marker: React.RefObject<HTMLSpanElement>,
 ): React.ReactNode[] {
@@ -5397,7 +5707,7 @@ function mirrorNodes(
   // `split` on a pattern with one group yields prose, reference, prose, reference…
   const parts = text.split(TOKEN_SPLIT);
   parts.forEach((part, i) => {
-    emit(part, i % 2 === 1 ? classOf(part, servers, params, skills, steering) : null, `p${i}`);
+    emit(part, i % 2 === 1 ? classOf(part, servers, params, skills, steering, remote) : null, `p${i}`);
   });
   return nodes;
 }
@@ -5467,6 +5777,7 @@ function PromptBox({
   parameters,
   skills,
   steeringFiles,
+  remote,
 }: {
   value: string;
   onChange: (next: string) => void;
@@ -5490,6 +5801,14 @@ function PromptBox({
   /** Skills and steering files this machine and directory carry - same treatment. */
   skills: Skill[];
   steeringFiles: SteeringFile[];
+  /**
+   * Set on a remote loop. The menu then offers the flock's vocabulary and none
+   * of this machine's: no servers, skills, steering or `@project`, since the
+   * node has none of them and Start would refuse the reference. The flock's two
+   * tools, `@browser` and `@deploy`, are always offered: naming the browser turns
+   * it on; deploy needs the trust deploy tick, which the hint says.
+   */
+  remote?: boolean;
 }) {
   const box = useRef<HTMLDivElement>(null);
   const back = useRef<HTMLPreElement>(null);
@@ -5509,19 +5828,27 @@ function PromptBox({
    */
   const [pos, setPos] = useState<{ top: number; left: number; height: number } | null>(null);
 
-  const names = useMemo(() => new Set(servers.map((s) => s.name.toLowerCase())), [servers]);
+  // On a remote loop the only "servers" a prompt can name are the flock's two
+  // tools; the local lists are not consulted at all.
+  const names = useMemo(
+    () => (remote ? new Set(REMOTE_TOOL_WORDS) : new Set(servers.map((s) => s.name.toLowerCase()))),
+    [servers, remote],
+  );
   const paramNames = useMemo(
     () => new Set(parameters.map((p) => p.name.toLowerCase())),
     [parameters],
   );
-  const skillNames = useMemo(() => new Set(skills.map((s) => s.name.toLowerCase())), [skills]);
+  const skillNames = useMemo(() => new Set(remote ? [] : skills.map((s) => s.name.toLowerCase())), [skills, remote]);
   const steeringNames = useMemo(
-    () => new Set(steeringFiles.map((s) => s.name.toLowerCase())),
-    [steeringFiles],
+    () => new Set(remote ? [] : steeringFiles.map((s) => s.name.toLowerCase())),
+    [steeringFiles, remote],
   );
   const all = useMemo(
-    () => suggestions(servers, reads, writes, baseDir, loopId, parameters, skills, steeringFiles),
-    [servers, reads, writes, baseDir, loopId, parameters, skills, steeringFiles],
+    () =>
+      remote
+        ? remoteSuggestions(reads, writes, parameters)
+        : suggestions(servers, reads, writes, baseDir, loopId, parameters, skills, steeringFiles),
+    [servers, reads, writes, baseDir, loopId, parameters, skills, steeringFiles, remote],
   );
   const shown = useMemo(() => {
     if (!menu) return [];
@@ -5698,6 +6025,7 @@ function PromptBox({
           paramNames,
           skillNames,
           steeringNames,
+          remote === true,
           open ? menu.caret : null,
           marker,
         )}

@@ -1,4 +1,6 @@
 import type {
+  RunSummary,
+  UsageEntry,
   Cluster,
   Factory,
   FactoryEntry,
@@ -112,6 +114,13 @@ const at = (factoryId: string): string => `/api/factories/${encodeURIComponent(f
 const checkoutParam = (checkout: string | undefined, lead: '?' | '&'): string =>
   checkout === undefined ? '' : `${lead}checkout=${encodeURIComponent(checkout)}`;
 
+/** App settings. `defaultDir` is where `+` puts a new factory, one folder each. */
+export interface AppConfig {
+  defaultDir: string;
+  /** What `defaultDir` is when nothing is saved: `app/workspaces` or `WORKSPACES`. */
+  builtinDefaultDir: string;
+}
+
 /** Where new factories are created, and which driver is loaded. */
 export interface Defaults {
   /**
@@ -127,6 +136,8 @@ export interface Defaults {
 /** One directory, and the directories inside it. */
 export interface BrowseDir {
   path: string;
+  /** This is the folder asked for, not the nearest existing one above it. */
+  exact?: boolean;
   /** The directory above, or null at the root of the filesystem. */
   parent: string | null;
   home: string;
@@ -189,6 +200,25 @@ export interface LoopFiles {
    * worse than no listing.
    */
   truncated?: boolean;
+}
+
+/**
+ * The project, one folder at a time: the root and each folder the panel asked for.
+ *
+ * `files` and `folders` are the direct entries of every listed folder, together.
+ * A folder arrives with its entry count, which is what a closed folder row shows.
+ */
+export interface ProjectFiles extends LoopFiles {
+  folders: ProjectFolderEntry[];
+  /** Listed folders that held more entries than the server sends, `''` for the root. */
+  capped: string[];
+}
+
+export interface ProjectFolderEntry {
+  /** Relative to the project, `/`-separated, with a trailing slash. */
+  path: string;
+  /** Its direct entries. */
+  count: number;
 }
 
 export interface LoopFileEntry {
@@ -349,6 +379,21 @@ export const api = {
       jsonOf<BrowseDir>,
     ),
 
+  /** Make a folder inside `parent` (under home only), and answer with its listing. */
+  mkdir: (parent: string, name: string): Promise<BrowseDir> =>
+    post<BrowseDir>('/api/browse/mkdir', { parent, name }),
+
+  /** The default folder for new factories, and the built-in one it falls back to. */
+  config: (): Promise<AppConfig> => send('/api/config').then(jsonOf<AppConfig>),
+
+  /** Save the default folder for new factories; null goes back to the built-in. */
+  setDefaultDir: (dir: string | null): Promise<AppConfig> =>
+    send('/api/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ defaultDir: dir }),
+    }).then(jsonOf<AppConfig>),
+
   /* --------------------------------------------------------------- library */
 
   /**
@@ -455,8 +500,12 @@ export const api = {
   createFactory: (input?: { name?: string; baseDir?: string }): Promise<Factory> =>
     post<Factory>('/api/factories', input ?? {}),
 
-  importFactory: (doc: unknown): Promise<{ factory: Factory; note?: string }> =>
-    post<{ factory: Factory; note?: string }>('/api/factories/import', doc),
+  /** Import the JSON that Export writes. `dir` is the folder it goes in; none is the default folder. */
+  importFactory: (doc: unknown, dir?: string): Promise<{ factory: Factory; note?: string }> =>
+    post<{ factory: Factory; note?: string }>(
+      `/api/factories/import${dir === undefined ? '' : `?dir=${encodeURIComponent(dir)}`}`,
+      doc,
+    ),
 
   /**
    * Open the factory that is already in a directory.
@@ -487,8 +536,17 @@ export const api = {
       body: JSON.stringify({ ids }),
     }).then(jsonOf<FactoryRef[]>),
 
-  /** Rename, or move to another directory. Either field on its own. */
-  patchFactory: (id: string, patch: { name?: string; baseDir?: string }): Promise<Factory> =>
+  /**
+   * Read this factory's design again from its file: the library entry it came
+   * from, or its own document on disk when it did not come from the library.
+   *
+   * Loops, wires and parameters are replaced; the factory keeps its id, name and
+   * directory. Refused with a message while loops run.
+   */
+  reloadFromLibrary: (id: string): Promise<Factory> => post<Factory>(`${at(id)}/reload`),
+
+  /** Rename. A factory is its folder, so there is no moving one. */
+  patchFactory: (id: string, patch: { name?: string }): Promise<Factory> =>
     send(at(id), {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
@@ -546,18 +604,30 @@ export const api = {
 
   output: (id: string, loopId: string): Promise<OutputLine[]> =>
     send(`${at(id)}/output/${encodeURIComponent(loopId)}`).then(jsonOf<OutputLine[]>),
+  /** One session's finished iterations in the current server run, with their credits. */
+  usage: (id: string, key: string): Promise<UsageEntry[]> =>
+    send(`${at(id)}/usage/${encodeURIComponent(key)}`).then(jsonOf<UsageEntry[]>),
+  /** Every run of this factory, newest first, from the on-disk ledger. */
+  usageHistory: (id: string): Promise<{ current: string; runs: RunSummary[] }> =>
+    send(`${at(id)}/usage-history`).then(jsonOf<{ current: string; runs: RunSummary[] }>),
 
   /* ------------------------------------------------------------- the project */
 
   /**
-   * The project the loops are building, as the same flat listing a loop's folder
-   * gives. Heavy directories - `node_modules`, `.git`, build output - are pruned
-   * server-side, so this is the source tree rather than everything on disk.
+   * The project the loops are building: the root, plus each of `folders` (the
+   * open ones, as `a/b/`). Heavy directories - `node_modules`, `.git`, build
+   * output, `.kirofactory` - are pruned server-side, so this is the source tree
+   * rather than everything on disk.
    *
    * No delete beside it, unlike the loop pair below: these are real source files.
    */
-  projectFiles: (id: string, checkout?: string): Promise<LoopFiles> =>
-    send(`${at(id)}/files${checkoutParam(checkout, '?')}`).then(jsonOf<LoopFiles>),
+  projectFiles: (id: string, folders: readonly string[], checkout?: string): Promise<ProjectFiles> => {
+    const params = new URLSearchParams();
+    for (const f of folders) params.append('folder', f);
+    if (checkout !== undefined) params.set('checkout', checkout);
+    const qs = params.toString();
+    return send(`${at(id)}/files${qs.length > 0 ? `?${qs}` : ''}`).then(jsonOf<ProjectFiles>);
+  },
 
   /** One of those files, by its path relative to the base directory. */
   projectFile: (id: string, file: string, checkout?: string): Promise<LoopFileBody> =>
@@ -566,8 +636,8 @@ export const api = {
     ),
 
   /**
-   * Copy a dropped file into the project root. Answers with the fresh listing, so
-   * the panel redraws from the truth rather than assuming the write worked. With
+   * Copy a dropped file into the project root. Answers with the root's listing;
+   * the panel re-reads its open folders itself afterwards. With
    * `checkout`, the file lands in that session's worktree instead - where the
    * panel says it is looking is where the drop goes.
    */
@@ -704,7 +774,136 @@ export const api = {
 
   /** Stop everything now, killing any turn in flight. */
   forceStopAll: (id: string): Promise<LoopStatus[]> => post<LoopStatus[]>(`${at(id)}/force-stop`),
+
+  /* ------------------------------------------------------------ remote loops */
+
+  /**
+   * Connections to Kiro Flocks. Every answer is a view without secrets: the
+   * server holds the tokens, and the
+   * browser only ever learns whether it is signed in.
+   */
+  flocks: {
+    list: (): Promise<FlockConnectionView[]> => send('/api/flocks').then(jsonOf<FlockConnectionView[]>),
+    add: (input: {
+      apiUrl: string;
+      username: string;
+      password: string;
+      mfaCode?: string;
+      name?: string;
+      userPoolId?: string;
+      clientId?: string;
+    }): Promise<FlockConnectionView> => post<FlockConnectionView>('/api/flocks', input),
+    remove: (cid: string): Promise<FlockConnectionView[]> =>
+      send(`/api/flocks/${encodeURIComponent(cid)}`, { method: 'DELETE' }).then(jsonOf<FlockConnectionView[]>),
+    rename: (cid: string, name: string): Promise<FlockConnectionView> =>
+      send(`/api/flocks/${encodeURIComponent(cid)}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name }),
+      }).then(jsonOf<FlockConnectionView>),
+    signin: (cid: string, password: string, mfaCode?: string): Promise<FlockConnectionView> =>
+      post<FlockConnectionView>(`/api/flocks/${encodeURIComponent(cid)}/signin`, { password, ...(mfaCode ? { mfaCode } : {}) }),
+    signout: (cid: string): Promise<FlockConnectionView> => post<FlockConnectionView>(`/api/flocks/${encodeURIComponent(cid)}/signout`),
+    models: (cid: string): Promise<FlockModelCatalog> =>
+      send(`/api/flocks/${encodeURIComponent(cid)}/models`).then(jsonOf<FlockModelCatalog>),
+    limits: (cid: string): Promise<{ concurrencyCap: number }> =>
+      send(`/api/flocks/${encodeURIComponent(cid)}/limits`).then(jsonOf<{ concurrencyCap: number }>),
+    probe: (cid: string): Promise<{ queueRoutes: boolean }> => post<{ queueRoutes: boolean }>(`/api/flocks/${encodeURIComponent(cid)}/probe`),
+    clusters: (cid: string): Promise<{ clusters: FlockClusterView[] }> =>
+      send(`/api/flocks/${encodeURIComponent(cid)}/clusters`).then(jsonOf<{ clusters: FlockClusterView[] }>),
+    stopCluster: (cid: string, clusterId: string): Promise<{ ok: boolean }> =>
+      post<{ ok: boolean }>(`/api/flocks/${encodeURIComponent(cid)}/clusters/${encodeURIComponent(clusterId)}/stop`),
+    removeCluster: (cid: string, clusterId: string): Promise<{ ok: boolean }> =>
+      send(`/api/flocks/${encodeURIComponent(cid)}/clusters/${encodeURIComponent(clusterId)}`, { method: 'DELETE' }).then(jsonOf<{ ok: boolean }>),
+  },
+
+  /** The ACP or console tail of one remote node, through the server's cache. */
+  remoteStream: (id: string, loopId: string, node: number, kind: 'acp' | 'console', session?: string): Promise<RemoteStream> =>
+    send(
+      `${at(id)}/loops/${encodeURIComponent(loopId)}/remote/stream?node=${node}&kind=${kind}${session ? `&session=${encodeURIComponent(session)}` : ''}`,
+    ).then(jsonOf<RemoteStream>),
+
+  /** Past iterations of one remote node, for the dropdown. */
+  remoteSessions: (id: string, loopId: string, node: number): Promise<RemoteSessions> =>
+    send(`${at(id)}/loops/${encodeURIComponent(loopId)}/remote/sessions?node=${node}`).then(jsonOf<RemoteSessions>),
+
+  /** The cluster's S3 subtree, read-only, in the loop-files shape. */
+  remoteFiles: (id: string, loopId: string): Promise<LoopFiles> =>
+    send(`${at(id)}/loops/${encodeURIComponent(loopId)}/remote/files`).then(jsonOf<LoopFiles>),
+
+  remoteFile: (id: string, loopId: string, file: string): Promise<LoopFileBody> =>
+    send(`${at(id)}/loops/${encodeURIComponent(loopId)}/remote/file?path=${encodeURIComponent(file)}`).then(jsonOf<LoopFileBody>),
+
+  /** Which remote loops are live, for the delete dialogs. */
+  remotes: (id: string): Promise<{ live: { loopId: string; name: string; connection: string; clusterId: string }[] }> =>
+    send(`${at(id)}/remotes`).then(jsonOf<{ live: { loopId: string; name: string; connection: string; clusterId: string }[] }>),
+
+  /** Stop and remove a remote loop's cluster. `files` also deletes its S3 folder. */
+  destroyRemote: (id: string, loopId: string, files: boolean): Promise<{ ok: boolean }> =>
+    send(`${at(id)}/loops/${encodeURIComponent(loopId)}/remote${files ? '?files=yes' : ''}`, { method: 'DELETE' }).then(jsonOf<{ ok: boolean }>),
+
+  /** Leave the cluster running and stop watching it. */
+  detachRemote: (id: string, loopId: string): Promise<{ ok: boolean }> =>
+    post<{ ok: boolean }>(`${at(id)}/loops/${encodeURIComponent(loopId)}/remote/detach`),
+
+  /**
+   * Delete a factory and its files, having decided per live remote cluster
+   * whether it keeps running, stops, or is removed from its flock too.
+   */
+  deleteFactoryWithRemotes: (id: string, choices: Record<string, 'keep' | 'stop' | 'delete'>): Promise<FactoryRef[]> => {
+    const remote = Object.entries(choices).map(([l, c]) => `${encodeURIComponent(l)}:${c}`).join(',');
+    return send(`${at(id)}?files=yes${remote ? `&remote=${remote}` : ''}`, { method: 'DELETE' }).then(jsonOf<FactoryRef[]>);
+  },
 };
+
+/** A connection as the browser sees it. No secret is ever in here. */
+export interface FlockConnectionView {
+  id: string;
+  name: string;
+  apiUrl: string;
+  username: string;
+  signedIn: boolean;
+  expiresAt?: number;
+  /** Whether the flock has the queue routes; undefined until probed. */
+  queueRoutes?: boolean;
+}
+
+export interface FlockModelCatalog {
+  models: { model_id: string; model_name?: string; description?: string }[];
+  default_model?: string | null;
+}
+
+export interface FlockClusterView {
+  id: string;
+  name: string;
+  algorithm: string;
+  createdAt: string;
+  state?: 'stopped' | 'starting' | 'running' | 'stopping' | 'paused';
+  totalCredits?: number | null;
+  infraCostUsd?: number | null;
+  owner: 'this-factory' | 'other-factory' | 'kiro-factory-orphan' | 'not-ours';
+  drivenBy?: { factory: string; loop: string };
+  detached?: { factoryName: string; baseDir: string; detachedAt: string };
+  uiUrl: string;
+}
+
+export interface RemoteStream {
+  agentIndex: number;
+  kind: 'acp' | 'console';
+  content: string | null;
+  unavailable?: string;
+  sessionId?: string;
+  sessionStatus?: 'active' | 'completed';
+  turnError?: string;
+  fetchedAt: string;
+}
+
+export interface RemoteSessions {
+  agentIndex: number;
+  sessions: { sessionId: string; iteration: number; exact: boolean; mtime: number; sizeBytes: number; active: boolean }[];
+  unavailable?: string;
+  fetchedAt: string;
+}
 
 /**
  * Subscribe to the server's event stream. Returns an unsubscribe function.
@@ -718,6 +917,7 @@ export function subscribe(handlers: {
   onStatus?: (s: Tagged<LoopStatus>) => void;
   onStatusAll?: (s: { factory: string; status: LoopStatus[] }) => void;
   onOutput?: (line: Tagged<OutputLine>) => void;
+  onUsage?: (entry: Tagged<UsageEntry>) => void;
   onFactory?: (f: Factory) => void;
   onFactories?: (list: FactoryRef[]) => void;
 }): () => void {
@@ -735,6 +935,7 @@ export function subscribe(handlers: {
   on('status', handlers.onStatus);
   on('status-all', handlers.onStatusAll);
   on('output', handlers.onOutput);
+  on('usage', handlers.onUsage);
   on('factory', handlers.onFactory);
   on('factories', handlers.onFactories);
   return () => es.close();

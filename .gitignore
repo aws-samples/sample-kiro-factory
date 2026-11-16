@@ -1,4 +1,5 @@
-# Local clones of reference projects (kiro-flock, aidlc-workflows, tiny-loop-sample)
+# Local clones of reference projects (aidlc-workflows, tiny-loop-sample).
+# kiro-flock is a git submodule at ./kiro-flock, not a reference clone.
 references/
 
 # Scratch space for command output and commit messages
@@ -23,3 +24,5 @@ app/workspaces/
 # Which factories are open on this machine, and where each one lives. Local state:
 # the factories themselves live in their own directories, under .kirofactory/.
 app/factories.json
+.scratch-test/
+.checkout

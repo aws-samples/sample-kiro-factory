@@ -186,10 +186,132 @@ export function inAnchor(loop: Loop): { x: number; y: number } {
   return { x: loop.x, y: loop.y + NODE_H / 2 };
 }
 
-/** Cubic bezier between two anchors, bowed horizontally like a dataflow editor. */
-export function wirePath(a: { x: number; y: number }, b: { x: number; y: number }): string {
+type Pt = { x: number; y: number };
+
+/** A wire's drawing and the point on it where its badge sits. */
+interface Route {
+  d: string;
+  mid: Pt;
+}
+
+/**
+ * A wire whose reader is not to the right of its producer is drawn as a loop
+ * around the boxes rather than as a curve through them.
+ *
+ * Out always leaves the right edge and in always arrives at the left, so a wire
+ * that goes back the way it came has to turn round somewhere. The forward bezier
+ * turns round by crossing its own control points, which puts the wire diagonally
+ * through whatever sits between the two boxes - the picture of a cycle was three
+ * lines meeting in the middle of the canvas. This routes it instead: out of the
+ * port, along a horizontal lane that clears both boxes, and back in. Cycles then
+ * read as cycles, a ring with the boxes on it.
+ */
+const BACK_REACH = 48;
+/** Clearance between a lane and the box it runs past. */
+const BACK_GAP = 28;
+const BACK_RADIUS = 24;
+/** Half the distance between the two lanes of a cycle running between two rows. */
+const LANE_SPLIT = 12;
+
+/**
+ * The y of the horizontal run of a backward wire.
+ *
+ * Between the two boxes when there is room, which is the compact S of one loop
+ * feeding the one below it. Otherwise outside both: the side that costs the least
+ * vertical travel, below on a tie, so a wire from the bottom of a column to the
+ * top of it rings the whole column rather than threading through it.
+ */
+function backLane(a: Pt, b: Pt): number {
+  const half = NODE_H / 2;
+  const [upper, lower] = a.y <= b.y ? [a, b] : [b, a];
+  if (lower.y - half - (upper.y + half) >= BACK_GAP * 2) {
+    // Two wires between the same rows going opposite ways - the two halves of a
+    // cycle - would share one lane and read as a single line. Downward wires take
+    // the upper side of the gap and upward ones the lower, so each runs alone.
+    return (upper.y + lower.y) / 2 + (a.y <= b.y ? -LANE_SPLIT : LANE_SPLIT);
+  }
+  const below = lower.y + half + BACK_GAP;
+  const above = upper.y - half - BACK_GAP;
+  const costBelow = below - a.y + (below - b.y);
+  const costAbove = a.y - above + (b.y - above);
+  return costAbove < costBelow ? above : below;
+}
+
+/**
+ * How much further out each additional backward wire on the same port runs.
+ *
+ * Several wires out of one loop that all have to turn round would otherwise share
+ * the vertical leg and the lane for as far as they run together, and a topic's
+ * two rails drawn twice on the same line is a smear. `rank` pushes each one a
+ * step further out: a wider turn and a lane a step further from the boxes.
+ */
+const RANK_STEP = 16;
+
+function backwardRoute(a: Pt, b: Pt, rank: number): Route {
+  const lane0 = backLane(a, b);
+  // Further from whichever row the lane is nearer to, so the step is outward.
+  const lane = lane0 + Math.sign(lane0 - (a.y + b.y) / 2 || 1) * rank * RANK_STEP;
+  const x1 = a.x + BACK_REACH + rank * RANK_STEP;
+  const x2 = b.x - BACK_REACH - rank * RANK_STEP;
+  // Corners cannot be rounder than the legs they join are long.
+  const r = Math.min(BACK_RADIUS, Math.abs(lane - a.y) / 2, Math.abs(lane - b.y) / 2, (x1 - x2) / 2);
+  const sa = Math.sign(lane - a.y); // which way the first vertical leg goes
+  const sb = Math.sign(b.y - lane); // and the second
+  const d = [
+    `M ${a.x} ${a.y}`,
+    `H ${x1 - r}`,
+    `Q ${x1} ${a.y} ${x1} ${a.y + sa * r}`,
+    `V ${lane - sa * r}`,
+    `Q ${x1} ${lane} ${x1 - r} ${lane}`,
+    `H ${x2 + r}`,
+    `Q ${x2} ${lane} ${x2} ${lane + sb * r}`,
+    `V ${b.y - sb * r}`,
+    `Q ${x2} ${b.y} ${x2 + r} ${b.y}`,
+    `H ${b.x}`,
+  ].join(' ');
+  // The badge sits forty percent along the lane from the producer's end, not
+  // halfway. The two halves of a cycle between two loops are mirror images, and
+  // halfway puts their badges on the same x a lane apart, one covering the other.
+  // Off-centre, each badge is nearer its own producer and they come apart.
+  return { d, mid: { x: x1 - (x1 - x2) * 0.4, y: lane } };
+}
+
+/**
+ * Cubic bezier between two anchors, bowed horizontally like a dataflow editor.
+ *
+ * Its midpoint really is the average of the endpoints, not an approximation. The
+ * two control points are offset from the anchors by the same `dx` in opposite
+ * directions, so evaluating the cubic at t=0.5 cancels them out exactly:
+ * (P0 + 3P1 + 3P2 + P3) / 8 reduces to (P0 + P3) / 2.
+ */
+function forwardRoute(a: Pt, b: Pt): Route {
   const dx = Math.max(40, Math.abs(b.x - a.x) * 0.5);
-  return `M ${a.x} ${a.y} C ${a.x + dx} ${a.y}, ${b.x - dx} ${b.y}, ${b.x} ${b.y}`;
+  return {
+    d: `M ${a.x} ${a.y} C ${a.x + dx} ${a.y}, ${b.x - dx} ${b.y}, ${b.x} ${b.y}`,
+    mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+  };
+}
+
+/** Forward when the reader is clearly to the right; otherwise round the back. */
+function route(a: Pt, b: Pt, rank: number): Route {
+  return b.x >= a.x + BACK_RADIUS ? forwardRoute(a, b) : backwardRoute(a, b, rank);
+}
+
+/** Does a wire between these anchors go round the back? */
+export function isBackward(a: Pt, b: Pt): boolean {
+  return b.x < a.x + BACK_RADIUS;
+}
+
+/**
+ * The drawing of a wire from one anchor to another.
+ *
+ * `rank` is this wire's position among the backward wires that share its producer
+ * or its reader, zero for the first, and only matters when the wire goes round the
+ * back - see `RANK_STEP`. The caller knows the other wires; this function sees two
+ * points.
+ */
+export function wirePath(a: Pt, b: Pt, rank = 0): string {
+  return route(a, b, rank).d;
 }
 
 /**
@@ -219,16 +341,10 @@ export function trunkPath(a: { x: number; y: number }, j: { x: number; y: number
 }
 
 /**
- * The point halfway along that curve, for putting a label on it.
- *
- * It really is just the average of the endpoints, not an approximation. The two
- * control points in `wirePath` are offset from the anchors by the same `dx` in
- * opposite directions, so evaluating the cubic at t=0.5 cancels them out
- * exactly: (P0 + 3P1 + 3P2 + P3) / 8 reduces to (P0 + P3) / 2.
+ * A point on that wire for putting a label on: halfway along a forward curve, the
+ * middle of the lane on a backward loop. Computed from the same route as the
+ * drawing so the badge is always on the line.
  */
-export function wireMidpoint(
-  a: { x: number; y: number },
-  b: { x: number; y: number },
-): { x: number; y: number } {
-  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+export function wireMidpoint(a: Pt, b: Pt, rank = 0): Pt {
+  return route(a, b, rank).mid;
 }

@@ -55,9 +55,45 @@ export interface Loop {
    * where they landed lives in a server-side sidecar, never in the document.
    */
   worktree?: boolean;
+  /**
+   * Run on a Kiro Flock the operator already has, as a cluster of the amorphous
+   * algorithm, rather than as subprocesses here. Absent means local, which is
+   * what every document written before this field existed means. Present forces
+   * `cluster` to `{mode:'fixed', comms:'flock'}` with no local size ceiling, and
+   * drops `tools`, `mcp`, `worktree`, `autoStop`, `stopAfterIterations`.
+   */
+  remote?: RemoteLoop;
   x: number;
   y: number;
 }
+
+/** Mirrored from server/factory.ts. */
+export interface RemoteLoop {
+  kind: 'flock';
+  /** Id of a connection in the server's `flocks.json`. Machine-local. */
+  connection: string;
+  /** The flock's coordination algorithm; absent is amorphous. */
+  algorithm?: RemoteAlgorithm;
+  neighbourRadius?: number;
+  /** Peers a swarm node reads; swarm only. */
+  swarmK?: number;
+  taskSize?: RemoteTaskSize;
+  browser?: boolean;
+  trustDeploy?: boolean;
+  selfOptimizing?: boolean;
+}
+
+export type RemoteTaskSize = 'small' | 'medium' | 'large' | 'xlarge';
+export const REMOTE_TASK_SIZES: readonly RemoteTaskSize[] = ['small', 'medium', 'large', 'xlarge'];
+
+export type RemoteAlgorithm = 'amorphous' | 'mesh' | 'swarm' | 'single';
+export const REMOTE_ALGORITHMS: readonly RemoteAlgorithm[] = ['amorphous', 'mesh', 'swarm', 'single'];
+
+/** One node is honest only when nodes have no peers. Mirrors `remoteMinSize` on the server. */
+export function remoteMinSize(algorithm: RemoteAlgorithm | undefined): number {
+  return algorithm === 'single' ? 1 : CLUSTER_MIN;
+}
+export const REMOTE_INTERVAL_MAX = 3600;
 
 /**
  * A loop cluster, mirrored from server/factory.ts.
@@ -290,6 +326,14 @@ export interface Factory {
   parameters?: Parameter[];
   loops: Loop[];
   wires: Wire[];
+  /**
+   * The library entry this was taken out of, by slug. Absent on a factory that was
+   * not. Server-owned: a save does not change it. It is what makes the shell's
+   * reload button an offer rather than a question.
+   */
+  source?: { library: string };
+  /** The flock deployment group the factory's remote loops share (`everforgeGroup`); the server always fills it. */
+  remoteGroup?: string;
 }
 
 /** A factory as the tab strip knows it, before its document is loaded. */
@@ -431,6 +475,13 @@ export interface LoopStatus {
   pausedFor?: 'work' | 'interval';
   iteration: number;
   /**
+   * Credits spent in the current server run, from kiro-cli's own metering. Absent
+   * until an iteration has finished. A server restart starts it over.
+   */
+  credits?: number;
+  /** How many finished iterations of this run were not metered. */
+  unmetered?: number;
+  /**
    * The last stop was the loop's own: the agent confirmed there was nothing left
    * to do. Present only while true, cleared by the next start. The canvas paints
    * the "ends" mark yellow off this, so a converged loop reads differently from
@@ -450,6 +501,26 @@ export interface LoopStatus {
    * a request per second.
    */
   nextTurnAt?: number;
+  /** Present on a remote loop's members: the flock cluster and the bridge to it. */
+  remote?: RemoteStatus;
+}
+
+/** Mirrored from server/runner.ts. */
+export interface RemoteStatus {
+  clusterState: 'stopped' | 'starting' | 'running' | 'stopping' | 'paused' | 'gone' | 'unknown';
+  stateReason?: string;
+  lastError?: string;
+  signedIn: boolean;
+  sync: 'live' | 'catching-up' | 'signed-out' | 'unreachable';
+  lastSyncAt?: string;
+  lastSeenAt?: string;
+  infraCostUsd?: number;
+  uiUrl: string;
+  clusterId: string;
+  connection: string;
+  inboxPending?: number;
+  outboxPending?: number;
+  problem?: string;
 }
 
 export interface OutputLine {
@@ -463,6 +534,36 @@ export interface OutputLine {
   ts: string;
   kind: 'text' | 'tool' | 'system' | 'iteration' | 'iteration-steered' | 'user';
   text: string;
+  /** Which iteration an `iteration` or `iteration-steered` divider opens. */
+  iteration?: number;
+}
+/** One finished iteration, mirrored from server/usage.ts. */
+export interface UsageEntry {
+  ts: string;
+  runId: string;
+  key: string;
+  loopId: string;
+  loopName: string;
+  iteration: number;
+  sessionId?: string;
+  /** Absent when the turn was not metered. */
+  credits?: number;
+  unmetered: boolean;
+  startedAt: string;
+  durationMs: number;
+  stopReason: string;
+  totalCredits: number;
+}
+/** One server run in a factory's cost history, mirrored from server/usage.ts. */
+export interface RunSummary {
+  runId: string;
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  iterations: number;
+  credits: number;
+  unmetered: number;
+  loops: Array<{ key: string; loopName: string; iterations: number; credits: number; unmetered: number }>;
 }
 
 /**
@@ -582,6 +683,12 @@ export function aggregate(loop: Loop, status: Map<string, LoopStatus>): LoopStat
     state,
     ...(state === 'paused' && why !== undefined ? { pausedFor: why } : {}),
     iteration: parts.reduce((sum, p) => sum + p.iteration, 0),
+    ...(parts.some((p) => p.credits !== undefined || p.unmetered !== undefined)
+      ? {
+          credits: parts.reduce((sum, p) => sum + (p.credits ?? 0), 0),
+          unmetered: parts.reduce((sum, p) => sum + (p.unmetered ?? 0), 0),
+        }
+      : {}),
     ...(live.length === 0 && parts.every((p) => p.autoStopped) ? { autoStopped: true } : {}),
     // Members of a run start together, so their deadlines agree; the first live
     // one is as good an answer as averaging them and is the one actually ticking.
